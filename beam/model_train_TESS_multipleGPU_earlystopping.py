@@ -1,24 +1,19 @@
 """
-TESS FFI Diffusion Model Training
+BEAM: Background Elimination with Advanced Machine learning - Training Script
 
 This script trains a conditional diffusion model on TESS (Transiting Exoplanet 
 Survey Satellite) Full Frame Images. The model generates TESS images conditioned
 on orbital parameters.
 
-The code is adapted from 
+The code is adapted from:
 https://github.com/TeaPearce/Conditional_Diffusion_MNIST
-
-which was originally modified from 
+which was originally modified from:
 https://github.com/cloneofsimo/minDiffusion
 
-Diffusion model is based on DDPM,
-https://arxiv.org/abs/2006.11239
-
-The conditioning idea is taken from 'Classifier-Free Diffusion Guidance',
-https://arxiv.org/abs/2207.12598
-
-This technique also features in ImageGen 'Photorealistic Text-to-Image Diffusion Modelswith Deep Language Understanding',
-https://arxiv.org/abs/2205.11487
+Based on research from:
+- DDPM: https://arxiv.org/abs/2006.11239
+- Classifier-Free Diffusion Guidance: https://arxiv.org/abs/2207.12598
+- ImageGen: https://arxiv.org/abs/2205.11487
 """
 
 import os
@@ -365,7 +360,7 @@ def train(rank: int, world_size: int, config: Dict) -> None:
     print(f"GPU {rank}: {len(train_dataloader)} training batches, {len(valid_dataloader)} validation batches")
     
     # Create model
-    in_dim = train_dataset[0]['x'].shape[2]  # Dimension of the conditioning vector
+    in_dim = next(iter(valid_dataloader))['x'].shape[2]  # Dimension of the conditioning vector
     
     # Initialize model
     ddpm = DDPM(

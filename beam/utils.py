@@ -1,20 +1,17 @@
 """
+BEAM: Background Elimination with Advanced Machine learning - Model Implementation
+
 This script defines a conditional diffusion model for image training and generation.
 
-The code is adapted from 
+The code is adapted from:
 https://github.com/TeaPearce/Conditional_Diffusion_MNIST
-
-which was originally modified from 
+which was originally modified from:
 https://github.com/cloneofsimo/minDiffusion
 
-Diffusion model is based on DDPM,
-https://arxiv.org/abs/2006.11239
-
-The conditioning idea is taken from 'Classifier-Free Diffusion Guidance',
-https://arxiv.org/abs/2207.12598
-
-This technique also features in ImageGen 'Photorealistic Text-to-Image Diffusion Modelswith Deep Language Understanding',
-https://arxiv.org/abs/2205.11487
+Based on research from:
+- DDPM: https://arxiv.org/abs/2006.11239
+- Classifier-Free Diffusion Guidance: https://arxiv.org/abs/2207.12598
+- ImageGen: https://arxiv.org/abs/2205.11487
 
 """
 
