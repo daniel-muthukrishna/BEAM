@@ -84,18 +84,15 @@ class TESSDataset(Dataset):
         # Process files in parallel
         print(f"Loading {len(files)} image files using {num_processes} processes...")
         with multiprocessing.Pool(processes=num_processes) as pool:
-            results = list(tqdm(
-                pool.imap(self.load_images_worker, files),
-                total=len(files),
-                desc="Loading images"
-            ))
+            results = pool.map(self.load_images_worker, files)
+            
+            # Process results and build dataset
+            for x, y, ffi_num in tqdm(results, desc="Processing results"):
+                if x is not None:
+                    self.data.append(x)
+                    self.labels.append(y)
+                    self.ffi_nums.append(ffi_num)
         
-        # Process results and build dataset
-        for x, y, ffi_num in tqdm(results, desc="Processing results"):
-            if x is not None:
-                self.data.append(x)
-                self.labels.append(y)
-                self.ffi_nums.append(ffi_num)
         
         # Report dataset loading time and size
         end_time = time.time()
