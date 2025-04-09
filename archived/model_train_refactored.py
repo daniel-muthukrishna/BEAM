@@ -37,7 +37,7 @@ from torch.utils.data.distributed import DistributedSampler
 import torchvision.transforms as transforms
 
 # Import model components from utils.py
-from utils import (
+from utils_refactored import (
     ContextUnet, 
     DDPM, 
     ResidualConvBlock, 
