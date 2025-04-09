@@ -19,8 +19,8 @@ def plot_samples(
     model: DDPM,
     dataloader: DataLoader,
     device: torch.device,
-    n_sample: int = 5,
-    n_datapoint: int = 5,
+    n_sample: int = 3,
+    n_datapoint: int = 3,
     image_shape: Tuple[int, int] = (64, 64),
     title: str = "Model Samples",
     save_path: Optional[str] = None
@@ -51,17 +51,18 @@ def plot_samples(
     orbits = data_batch['orbit'][:n_datapoint]
     
     # Generate samples
-    x_gen, x_gen_store = model.sample_c(
-        c_real, 
-        n_sample, 
-        (1, image_shape[0], image_shape[1]), 
-        device
-    )
+    with torch.no_grad():
+        x_gen, x_gen_store = model.sample_c(
+            c_real, 
+            n_sample, 
+            (1, image_shape[0], image_shape[1]), 
+            device
+        )
     
     # Create figure with original images and generated samples
     fig, axes = plt.subplots(n_datapoint, n_sample + 1, figsize=(15, 3 * n_datapoint))
     plt.subplots_adjust(top=0.9)
-    
+  
     # Handle case when n_datapoint = 1
     if n_datapoint == 1:
         axes = [axes]
@@ -107,7 +108,8 @@ def plot_samples(
         plt.tight_layout()
         fig.savefig(save_path)
         print(f'Saved samples to {save_path}')
-    
+    plt.close(fig)
+
     return fig
 
 

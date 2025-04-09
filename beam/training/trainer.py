@@ -9,6 +9,7 @@ import os
 import time
 import pickle
 from typing import Dict, List, Tuple, Optional, Union, Callable
+import traceback
 
 import numpy as np
 import torch
@@ -103,8 +104,8 @@ class DiffusionTrainer:
         train_loader = DataLoader(
             self.train_dataset, 
             batch_size=self.config['training_batch_size'], 
-            pin_memory=True,
-            num_workers=2, 
+            pin_memory=False,
+            num_workers=0, 
             drop_last=True, 
             sampler=train_sampler,
             shuffle=(train_sampler is None)
@@ -113,8 +114,8 @@ class DiffusionTrainer:
         valid_loader = DataLoader(
             self.valid_dataset, 
             batch_size=self.config['training_batch_size'], 
-            pin_memory=True,
-            num_workers=2, 
+            pin_memory=False,
+            num_workers=0, 
             drop_last=True, 
             sampler=valid_sampler,
             shuffle=False
@@ -357,53 +358,63 @@ class DiffusionTrainer:
             
         print(f'Running checkpoint at epoch {self.current_epoch} on GPU {self.rank}')
         
-        # Get base model (remove DistributedDataParallel wrapper if needed)
-        model = self.model.module if isinstance(self.model, nn.parallel.DistributedDataParallel) else self.model
-        
-        # Generate and save sample images
-        image_shape = self.config['data_image_shape']
-        plot_samples(
-            model=model,
-            dataloader=self.train_loader,
-            device=self.device,
-            n_sample=5,  # Number of samples per conditioning vector
-            n_datapoint=5,  # Number of datapoints to visualize
-            image_shape=image_shape,
-            title=f"Training Samples (Epoch {self.current_epoch})",
-            save_path=os.path.join(self.save_dir, f"image_ep{self.current_epoch}_train.pdf")
-        )
-        
-        plot_samples(
-            model=model,
-            dataloader=self.valid_loader,
-            device=self.device,
-            n_sample=5,
-            n_datapoint=5,
-            image_shape=image_shape,
-            title=f"Validation Samples (Epoch {self.current_epoch})",
-            save_path=os.path.join(self.save_dir, f"image_ep{self.current_epoch}_valid.pdf")
-        )
-        
-        # Save loss plots
-        plot_loss_history(
-            train_losses=self.loss_history_train,
-            valid_losses=self.loss_history_valid,
-            save_dir=self.save_dir,
-            show_last_n=50
-        )
-        
-        # Save loss history to text file
-        self._save_loss_history()
-        
-        # Save model
-        if save_model:
-            self.save_checkpoint(self.current_epoch)
-        
-        # Check for early stopping
-        early_stop = (self.epochs_without_improvement >= self.config['training_patience'] and 
-                      self.current_epoch >= self.config['training_patience'])
-        
-        return early_stop
+        try:
+            # Get base model (remove DistributedDataParallel wrapper if needed)
+            model = self.model.module if isinstance(self.model, nn.parallel.DistributedDataParallel) else self.model
+            
+            # Generate and save sample images
+            image_shape = self.config['data_image_shape']
+            
+            # Plot training samples
+            plot_samples(
+                model=model,
+                dataloader=self.train_loader,
+                device=self.device,
+                n_sample=3,
+                n_datapoint=3,
+                image_shape=image_shape,
+                title=f"Training Samples (Epoch {self.current_epoch})",
+                save_path=os.path.join(self.save_dir, f"image_ep{self.current_epoch}_train.pdf")
+            )
+            
+            # Plot validation samples
+            plot_samples(
+                model=model,
+                dataloader=self.valid_loader,
+                device=self.device,
+                n_sample=5,
+                n_datapoint=5,
+                image_shape=image_shape,
+                title=f"Validation Samples (Epoch {self.current_epoch})",
+                save_path=os.path.join(self.save_dir, f"image_ep{self.current_epoch}_valid.pdf")
+            )
+            
+            # Save loss plots
+            plot_loss_history(
+                train_losses=self.loss_history_train,
+                valid_losses=self.loss_history_valid,
+                save_dir=self.save_dir,
+                show_last_n=50
+            )
+            
+            # Save loss history to text file
+            self._save_loss_history()
+            
+            # Save model
+            if save_model:
+                self.save_checkpoint(self.current_epoch)
+            
+            # Check for early stopping
+            early_stop = (self.epochs_without_improvement >= self.config['training_patience'] and 
+                        self.current_epoch >= self.config['training_patience'])
+            
+            return early_stop
+            
+        except Exception as e:
+            print(f"Error in checkpoint on GPU {self.rank}: {e}")
+            traceback.print_exc()
+            # Don't stop training just because checkpoint failed
+            return False
     
     def _save_loss_history(self) -> None:
         """
@@ -455,6 +466,9 @@ class DiffusionTrainer:
             # Validate
             valid_loss = self.validate_epoch()
             self.loss_history_valid.append(valid_loss)
+
+            # Memory cleanup here
+            torch.cuda.empty_cache()
             
             # Update time history
             current_time = round((time.time() - self.start_training_time) / 3600, 3)  # Hours
