@@ -35,7 +35,8 @@ class DiffusionTrainer:
         valid_dataset: Dataset,
         rank: int = 0,
         world_size: int = 1,
-        device: Optional[torch.device] = None
+        device: Optional[torch.device] = None,
+        callbacks: List = None  # Add callbacks parameter
     ):
         self.config = config
         self.train_dataset = train_dataset
@@ -43,6 +44,9 @@ class DiffusionTrainer:
         self.rank = rank
         self.world_size = world_size
         self.device = device or torch.device(f'cuda:{rank}' if torch.cuda.is_available() else 'cpu')
+        
+        # Initialize callbacks
+        self.callbacks = callbacks or []
         
         # Create data loaders
         self.train_loader, self.valid_loader = self._create_data_loaders()
@@ -64,6 +68,7 @@ class DiffusionTrainer:
         self.epochs_without_improvement = 0
         self.current_epoch = 0
         self.start_training_time = None
+        self.stop_training = False  # Flag for early stopping
         
         # Create checkpoint directory
         self.save_dir = config['paths_save_dir']
@@ -290,7 +295,14 @@ class DiffusionTrainer:
         # Training loop
         loss_ema_train = None
         
-        for data_batch in tqdm(self.train_loader, desc=f"Training epoch {self.current_epoch}"):
+        for batch_idx, data_batch in enumerate(tqdm(self.train_loader, desc=f"Training epoch {self.current_epoch}")):
+            # Call on_batch_begin callbacks
+            for callback in self.callbacks:
+                callback.on_batch_begin(self, batch_idx)
+                
+            # Prepare batch logs
+            batch_logs = {}
+            
             self.optimizer.zero_grad()
             
             # Move data to device
@@ -309,6 +321,14 @@ class DiffusionTrainer:
                 loss_ema_train = loss_train.item()
             else:
                 loss_ema_train = 0.95 * loss_ema_train + 0.05 * loss_train.item()
+            
+            # Update batch logs
+            batch_logs["batch_loss"] = loss_train.item()
+            batch_logs["batch_loss_ema"] = loss_ema_train
+            
+            # Call on_batch_end callbacks
+            for callback in self.callbacks:
+                callback.on_batch_end(self, batch_idx, batch_logs)
         
         return loss_ema_train
     
@@ -361,33 +381,30 @@ class DiffusionTrainer:
         try:
             # Get base model (remove DistributedDataParallel wrapper if needed)
             model = self.model.module if isinstance(self.model, nn.parallel.DistributedDataParallel) else self.model
-            
-            # Generate and save sample images
-            image_shape = self.config['data_image_shape']
-            
+                        
             # Plot training samples
-            plot_samples(
-                model=model,
-                dataloader=self.train_loader,
-                device=self.device,
-                n_sample=3,
-                n_datapoint=3,
-                image_shape=image_shape,
-                title=f"Training Samples (Epoch {self.current_epoch})",
-                save_path=os.path.join(self.save_dir, f"image_ep{self.current_epoch}_train.pdf")
-            )
+            # plot_samples(
+            #     model=model,
+            #     dataloader=self.train_loader,
+            #     device=self.device,
+            #     n_sample=3,
+            #     n_datapoint=3,
+            #     image_shape=self.config['data_image_shape'],
+            #     title=f"Training Samples (Epoch {self.current_epoch})",
+            #     save_path=os.path.join(self.save_dir, f"image_ep{self.current_epoch}_train.pdf")
+            # )
             
-            # Plot validation samples
-            plot_samples(
-                model=model,
-                dataloader=self.valid_loader,
-                device=self.device,
-                n_sample=5,
-                n_datapoint=5,
-                image_shape=image_shape,
-                title=f"Validation Samples (Epoch {self.current_epoch})",
-                save_path=os.path.join(self.save_dir, f"image_ep{self.current_epoch}_valid.pdf")
-            )
+            # # Plot validation samples
+            # plot_samples(
+            #     model=model,
+            #     dataloader=self.valid_loader,
+            #     device=self.device,
+            #     n_sample=5,
+            #     n_datapoint=5,
+            #     image_shape=self.config['data_image_shape'],
+            #     title=f"Validation Samples (Epoch {self.current_epoch})",
+            #     save_path=os.path.join(self.save_dir, f"image_ep{self.current_epoch}_valid.pdf")
+            # )
             
             # Save loss plots
             plot_loss_history(
@@ -454,10 +471,18 @@ class DiffusionTrainer:
         # Initialize timing
         self.start_training_time = time.time()
         
+        # Call on_train_begin callbacks
+        for callback in self.callbacks:
+            callback.on_train_begin(self)
+        
         # Training loop
         for epoch in range(self.current_epoch, n_epoch):
             self.current_epoch = epoch
             print(f'Epoch {epoch}/{n_epoch}, GPU {self.rank}')
+            
+            # Call on_epoch_begin callbacks
+            for callback in self.callbacks:
+                callback.on_epoch_begin(self, epoch)
             
             # Train for one epoch
             train_loss = self.train_epoch()
@@ -481,6 +506,20 @@ class DiffusionTrainer:
             else:
                 self.epochs_without_improvement += 1
             
+            # Create logs dictionary for callbacks
+            logs = {
+                "train_loss": train_loss,
+                "valid_loss": valid_loss,
+                "time_hours": current_time,
+                "lr": self.optimizer.param_groups[0]['lr'],
+                "best_valid_loss": self.best_valid_loss,
+                "epochs_without_improvement": self.epochs_without_improvement
+            }
+            
+            # Call on_epoch_end callbacks
+            for callback in self.callbacks:
+                callback.on_epoch_end(self, epoch, logs)
+            
             # Print status
             print(f"Epoch {epoch}: Train Loss = {train_loss:.6f}, Valid Loss = {valid_loss:.6f}, "
                   f"Time = {current_time:.2f} hours")
@@ -499,8 +538,12 @@ class DiffusionTrainer:
                     dist.all_reduce(early_stop_tensor, op=dist.ReduceOp.MAX)
                     early_stop = early_stop_tensor.item() == 1
                 
-                if early_stop:
+                if early_stop or self.stop_training:
                     print(f"Early stopping triggered after {epoch} epochs on GPU {self.rank}")
                     break
+        
+        # Call on_train_end callbacks
+        for callback in self.callbacks:
+            callback.on_train_end(self)
         
         return self.loss_history_train, self.loss_history_valid

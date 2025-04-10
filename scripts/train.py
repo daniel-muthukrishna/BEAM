@@ -8,6 +8,7 @@ Survey Satellite) Full Frame Images.
 
 import os
 import argparse
+import datetime
 import torch
 import torch.multiprocessing as mp
 
@@ -15,6 +16,8 @@ from beam.data.datasets import TESSDataset, create_train_valid_datasets
 from beam.training.trainer import DiffusionTrainer
 from beam.training.distributed import run_distributed
 from beam.utils.config import load_config, prepare_training_config
+from beam.training.wandb_callback import WeightsAndBiasesCallback
+from beam.training.callbacks import ModelCheckpoint, EarlyStopping
 
 
 def parse_args():
@@ -25,6 +28,8 @@ def parse_args():
                         help='Path to configuration YAML file')
     parser.add_argument('--resume', type=str, default=None,
                         help='Path to checkpoint to resume training from')
+    parser.add_argument('--wandb', type=str, default='online',
+                        help='W&B logging mode: online, offline, or disabled')
     
     return parser.parse_args()
 
@@ -67,7 +72,63 @@ def prepare_dataset(config):
     return train_dataset, valid_dataset
 
 
-def train_worker(rank, world_size, config, train_dataset, valid_dataset, resume_path=None, device=None):
+def create_callbacks(config, args, rank):
+    """
+    Create training callbacks.
+    
+    Args:
+        config: Training configuration
+        args: Command line arguments
+        rank: GPU rank
+        
+    Returns:
+        List of callbacks
+    """
+    callbacks = []
+    
+    # Only add callbacks on the main process (rank 0)
+    if rank == 0:
+        # Add ModelCheckpoint callback
+        checkpoint_callback = ModelCheckpoint(
+            filepath=os.path.join(config['paths_save_dir'], 'checkpoint_epoch_{epoch:03d}.pth'),
+            monitor='valid_loss',
+            save_best_only=True,
+            save_weights_only=False,
+            mode='min',
+            period=config.get('checkpoint_epoch_checkpoint', 10)
+        )
+        callbacks.append(checkpoint_callback)
+        
+        # Add EarlyStopping callback
+        early_stopping = EarlyStopping(
+            monitor='valid_loss',
+            patience=config['training_patience'],
+            min_delta=0.0001,
+            mode='min'
+        )
+        callbacks.append(early_stopping)
+        
+        # Add Weights & Biases callback if enabled
+        if args.wandb != 'disabled':
+            # Get model name from config and append timestamp to create a unique run name
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            model_name = config.get('wandb_model_name', 'beam-tess-model')
+            run_name = f"{model_name}_{timestamp}"
+            wandb_callback = WeightsAndBiasesCallback(
+                project_name=config.get('wandb_project', 'beam-tess'),
+                model_name=run_name,
+                log_freq=config.get('wandb_log_freq', 10),
+                log_samples_freq=config.get('wandb_log_samples_freq', 5),
+                log_model_freq=config.get('wandb_log_model_freq', 20),
+                use_wandb=True,
+                mode=args.wandb
+            )
+            callbacks.append(wandb_callback)
+    
+    return callbacks
+
+
+def train_worker(rank, world_size, config, train_dataset, valid_dataset, args, resume_path=None, device=None):
     """
     Worker function for training on a single GPU.
     
@@ -77,6 +138,7 @@ def train_worker(rank, world_size, config, train_dataset, valid_dataset, resume_
         config: Training configuration
         train_dataset: Training dataset (pre-created in main process)
         valid_dataset: Validation dataset (pre-created in main process)
+        args: Command line arguments
         resume_path: Path to checkpoint to resume from
         device: Device to train on
     """
@@ -87,6 +149,9 @@ def train_worker(rank, world_size, config, train_dataset, valid_dataset, resume_
     print(f"GPU {rank}: Starting worker with {len(train_dataset)} training samples "
           f"and {len(valid_dataset)} validation samples")
     
+    # Create callbacks
+    callbacks = create_callbacks(config, args, rank)
+    
     # Create trainer
     trainer = DiffusionTrainer(
         config=config,
@@ -94,7 +159,8 @@ def train_worker(rank, world_size, config, train_dataset, valid_dataset, resume_
         valid_dataset=valid_dataset,
         rank=rank,
         world_size=world_size,
-        device=device
+        device=device,
+        callbacks=callbacks  # Pass callbacks to trainer
     )
     
     # Resume from checkpoint if specified
@@ -132,7 +198,7 @@ def main():
     run_distributed(
         train_worker,
         world_size=world_size,
-        args=(flat_config, train_dataset, valid_dataset, args.resume),
+        args=(flat_config, train_dataset, valid_dataset, args, args.resume),
     )
     
     print("Training complete!")
@@ -140,5 +206,5 @@ def main():
 
 if __name__ == "__main__":
     # Set multiprocessing start method
-    mp.set_start_method('spawn', force=True)
+    # mp.set_start_method('spawn', force=True)
     main()

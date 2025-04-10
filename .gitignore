@@ -50,13 +50,16 @@ coverage.xml
 model_outputs/
 generated_samples/
 logs/
+wandb/
 *.pth
 *.pt
 *.pkl
 *.h5
 *.ckpt
 *.pdf
-archived/archived_runs
+archived/archived_runs/
+model_TESS_diffusion/
+model_TESS_O11-54_im64x64_multipleGPUs_earlyStop_TEST/
 
 # Data files
 *.fits
