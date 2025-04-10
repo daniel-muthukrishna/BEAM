@@ -126,7 +126,7 @@ def main():
     with torch.no_grad():
         if args.guidance_scale > 0:
             # Generate with guidance
-            x_gen, x_gen_store = model.sample(
+            x_gen, x_gen_store, timesteps_store = model.sample(
                 n_sample=params.shape[0],
                 size=(1, image_shape[0], image_shape[1]),
                 device=device,
@@ -134,7 +134,7 @@ def main():
             )
         else:
             # Generate conditioned on parameters
-            x_gen, x_gen_store = model.sample_c(
+            x_gen, x_gen_store, timesteps_store = model.sample_c(
                 c_i=params,
                 n_sample=1,
                 size=(1, image_shape[0], image_shape[1]),

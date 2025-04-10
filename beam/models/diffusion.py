@@ -112,7 +112,7 @@ class DDPM(nn.Module):
         size: Tuple[int, ...], 
         device: torch.device, 
         guide_w: float = 0.0
-    ) -> Tuple[torch.Tensor, np.ndarray]:
+    ) -> Tuple[torch.Tensor, np.ndarray, List[int]]:
         """
         Sample from the model using classifier-free guidance.
         
@@ -123,7 +123,7 @@ class DDPM(nn.Module):
             guide_w: Guidance scale (0 = no guidance)
             
         Returns:
-            Tuple of (final samples, intermediate samples)
+            Tuple of (final samples, intermediate samples, timesteps))
         """
         # Start with random noise
         x_i = torch.randn(n_sample, *size).to(device)  
@@ -140,6 +140,7 @@ class DDPM(nn.Module):
         context_mask[n_sample:] = 1.  # Second half with no context
 
         x_i_store = []  # Store intermediate generations
+        timesteps_store = []  # Store corresponding timesteps
         
         print()
         # Reverse diffusion process
@@ -175,7 +176,8 @@ class DDPM(nn.Module):
             # Store intermediate samples periodically
             if i % 20 == 0 or i == self.n_T or i < 8:
                 x_i_store.append(x_i.detach().cpu().numpy())
-        
+                timesteps_store.append(i)
+
         x_i_store = np.array(x_i_store)
         return x_i, x_i_store
 
@@ -185,7 +187,7 @@ class DDPM(nn.Module):
         n_sample: int, 
         size: Tuple[int, ...], 
         device: torch.device
-    ) -> Tuple[torch.Tensor, np.ndarray]:
+    ) -> Tuple[torch.Tensor, np.ndarray, List[int]]:
         """
         Sample from the model with specific conditioning.
         
@@ -196,7 +198,7 @@ class DDPM(nn.Module):
             device: Device to generate on
             
         Returns:
-            Tuple of (final samples, intermediate samples)
+            Tuple of (final samples, intermediate samples, timesteps))
         """
         n_datapoint = c_i.shape[0]
 
@@ -210,6 +212,8 @@ class DDPM(nn.Module):
         context_mask = torch.zeros_like(c_i).to(device)
 
         x_i_store = []  # Store intermediate generations
+        timesteps_store = []  # Store corresponding timesteps
+
         
         print()
         # Reverse diffusion process
@@ -233,6 +237,7 @@ class DDPM(nn.Module):
             # Store intermediate samples periodically
             if i % 20 == 0 or i == self.n_T or i < 8:
                 x_i_store.append(x_i.detach().cpu().numpy())
-        
+                timesteps_store.append(i)
+
         x_i_store = np.array(x_i_store)
-        return x_i, x_i_store
+        return x_i, x_i_store, timesteps_store

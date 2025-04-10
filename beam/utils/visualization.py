@@ -52,7 +52,7 @@ def plot_samples(
     
     # Generate samples
     with torch.no_grad():
-        x_gen, x_gen_store = model.sample_c(
+        x_gen, x_gen_store, timesteps_store = model.sample_c(
             c_real, 
             n_sample, 
             (1, image_shape[0], image_shape[1]), 
