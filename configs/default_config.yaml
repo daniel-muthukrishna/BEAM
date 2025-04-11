@@ -35,12 +35,12 @@ wandb:
   log_freq: 50           # Log batch metrics every N batches (higher value = less traffic)
   log_samples_freq: 10   # Log sample images every N epochs
   log_model_freq: 50     # Log model weights every N epochs
-  model_name: "test"  # Base name for the model and W&B run
+  model_name: "full-refactor-multigpu"     # Base name for the model and W&B run
   
 # Paths
 paths:
-  save_dir: "model_outputs/test/"  # Directory to save model and results
+  save_dir: "model_outputs/full-refactor-multigpu/"  # Directory to save model and results
   
 # Distributed training
 distributed:
-  world_size: 1 # null       # Number of GPUs (null = auto-detect)
+  world_size: null       # Number of GPUs (null = auto-detect)
