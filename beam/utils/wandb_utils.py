@@ -202,8 +202,8 @@ def log_sample_images(
     # Log generation process for one sample
     if len(timesteps_store) > 8:
         indices = -np.logspace(0.2, np.log10(len(timesteps_store)), 8, dtype=int) # log scale so that earlier diffusion steps are more frequent
-        display_timesteps = [timesteps_store[i] for i in indices]
-        display_samples = [x_gen_store[i] for i in indices]
+        display_timesteps = [timesteps_store[i] for i in indices][::-1]
+        display_samples = [x_gen_store[i] for i in indices][::-1]
     else:
         display_timesteps = timesteps_store
         display_samples = x_gen_store   
