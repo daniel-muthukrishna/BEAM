@@ -206,5 +206,5 @@ def main():
 
 if __name__ == "__main__":
     # Set multiprocessing start method
-    # mp.set_start_method('spawn', force=True)
+    mp.set_start_method('spawn', force=True)
     main()
