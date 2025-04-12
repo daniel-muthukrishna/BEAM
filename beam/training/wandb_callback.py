@@ -73,13 +73,16 @@ class WeightsAndBiasesCallback(Callback):
         
         # Initialize W&B
         init_wandb(config, self.project_name, self.mode)
-        
+
         print(f"Initialized W&B logging with run name: {self.model_name}")
+
+        # Calculate steps per epoch correctly for distributed training
+        self.steps_per_epoch = len(trainer.train_dataset) // trainer.config['training_batch_size']
         
         # Set initial step based on current epoch (in case of resuming training)
         if trainer.current_epoch > 0:
             # Estimate the step based on the epoch * batch size
-            self.current_step = trainer.current_epoch * len(trainer.train_loader)
+            self.current_step = trainer.current_epoch * self.steps_per_epoch
         
     def on_train_end(self, trainer: Any) -> None:
         """Finish W&B run at the end of training."""
@@ -108,7 +111,7 @@ class WeightsAndBiasesCallback(Callback):
             return
         
         # Update current step
-        self.current_step = max(self.current_step, epoch * len(trainer.train_loader) + self.batch_count)
+        self.current_step = max(self.current_step, epoch * self.steps_per_epoch + self.batch_count)
             
         # Log epoch metrics
         try:
@@ -176,8 +179,7 @@ class WeightsAndBiasesCallback(Callback):
         self.batch_count += 1
         
         # Update current step
-        self.current_step = max(self.current_step, 
-                              trainer.current_epoch * len(trainer.train_loader) + self.batch_count)
+        self.current_step = max(self.current_step, trainer.current_epoch * self.steps_per_epoch + self.batch_count)
         
         if not self.use_wandb or batch % self.log_freq != 0:
             return
