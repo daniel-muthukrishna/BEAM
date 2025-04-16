@@ -159,7 +159,7 @@ def save_generated_images(
         
         # Save image
         plt.figure(figsize=(5, 5))
-        plt.imshow(img_np, cmap='gray', vmin=0, vmax=1)
+        plt.imshow(img_np, cmap='viridis', vmin=0, vmax=1)
         plt.axis('off')
         plt.tight_layout(pad=0)
         plt.savefig(filepath, bbox_inches='tight', pad_inches=0)

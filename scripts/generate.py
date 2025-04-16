@@ -155,7 +155,7 @@ def main():
         
         # Save generated image
         plt.figure(figsize=(6, 6))
-        plt.imshow(x_gen[i][0].cpu().numpy(), cmap='gray', vmin=0, vmax=1)
+        plt.imshow(x_gen[i][0].cpu().numpy(), cmap='viridis', vmin=0, vmax=1)
         plt.axis('off')
         plt.title(f"Generated Sample {i+1}")
         plt.tight_layout()

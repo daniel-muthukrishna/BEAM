@@ -89,7 +89,7 @@ def plot_samples(
         for j in range(n_sample):
             axes[i][j+1].imshow(
                 x_gen[i*n_sample + j][0].cpu().detach().numpy(), 
-                cmap='gray', 
+                cmap='cmap', 
                 vmin=0, 
                 vmax=1
             )
@@ -205,7 +205,7 @@ def plot_generation_process(
     for i, t in enumerate(timesteps):
         axes[i].imshow(
             x_gen_store[t, sample_idx, 0], 
-            cmap='gray', 
+            cmap='viridis', 
             vmin=0, 
             vmax=1
         )

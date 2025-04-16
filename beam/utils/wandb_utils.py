@@ -175,14 +175,14 @@ def log_sample_images(
         
         # Add original image
         plt.subplot(1, n_sample+1, 1)
-        plt.imshow(x_real[i][0].cpu().detach().numpy(), cmap='gray', vmin=0, vmax=1)
+        plt.imshow(x_real[i][0].cpu().detach().numpy(), cmap='viridis', vmin=0, vmax=1)
         plt.title(f"Original\nOrbit {orbits[i]}, FFI {ffi_nums[i]}")
         plt.axis('off')
         
         # Add generated samples
         for j in range(n_sample):
             plt.subplot(1, n_sample+1, j+2)
-            plt.imshow(x_gen[i*n_sample + j][0].cpu().detach().numpy(), cmap='gray', vmin=0, vmax=1)
+            plt.imshow(x_gen[i*n_sample + j][0].cpu().detach().numpy(), cmap='viridis', vmin=0, vmax=1)
             plt.title(f"Sample {j+1}")
             plt.axis('off')
             
