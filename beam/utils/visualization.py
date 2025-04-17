@@ -72,7 +72,7 @@ def plot_samples(
         # Display original
         axes[i][0].imshow(
             x_real[i][0].cpu().detach().numpy(), 
-            cmap='gray', 
+            cmap='viridis', 
             vmin=0, 
             vmax=1
         )
