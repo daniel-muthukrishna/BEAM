@@ -7,14 +7,14 @@ processing TESS image data.
 
 from beam.data.datasets import (
     TESSDataset,
+    create_train_valid_datasets_by_orbit,
     TESS_4096_original_images,
     TESS_4096_processed_images,
-    create_train_valid_datasets
 )
 
 __all__ = [
     'TESSDataset',
+    'create_train_valid_datasets_by_orbit',
     'TESS_4096_original_images',
     'TESS_4096_processed_images',
-    'create_train_valid_datasets'
 ]

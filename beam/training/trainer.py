@@ -44,6 +44,9 @@ class DiffusionTrainer:
         self.rank = rank
         self.world_size = world_size
         self.device = device or torch.device(f'cuda:{rank}' if torch.cuda.is_available() else 'cpu')
+        # Enforce CUDA for distributed training
+        if self.world_size > 1 and self.device.type != "cuda":
+            raise RuntimeError("Distributed training with multiple GPUs requires CUDA devices. Please run on a machine with GPUs and CUDA available.")
         
         # Initialize callbacks
         self.callbacks = callbacks or []
@@ -76,6 +79,7 @@ class DiffusionTrainer:
         
         # Save dataset info
         if rank == 0:
+            print(f"GPU {rank}: Saving dataset splits and model info...")
             self._save_dataset_splits()
             self._save_model_info()
     
@@ -109,8 +113,8 @@ class DiffusionTrainer:
         train_loader = DataLoader(
             self.train_dataset, 
             batch_size=self.config['training_batch_size'], 
-            pin_memory=False,
-            num_workers=0, 
+            pin_memory=False, #False -> True
+            num_workers=0, # 0 -> 4
             drop_last=True, 
             sampler=train_sampler,
             shuffle=(train_sampler is None)
@@ -149,14 +153,25 @@ class DiffusionTrainer:
         # Create DDPM model
         ddpm = DDPM(
             nn_model=unet, 
-            betas=(1e-4, 0.02), 
+            betas=tuple(self.config['model_betas']), 
             n_T=self.config['model_n_T'], 
             device=self.device, 
             drop_prob=0.1
         )
+        ddpm.to(self.device)
         
         # Wrap model for distributed training if using multiple GPUs
         if self.world_size > 1:
+            # Diagnostic: print device info for all parameters and buffers
+            # print(f"GPU {self.rank}: Checking model parameter and buffer devices before DDP wrapping...")
+            # for name, param in ddpm.named_parameters():
+            #     print(f"GPU {self.rank}: Parameter {name} is on {param.device}")
+            #     if param.device != self.device:
+            #         raise RuntimeError(f"Parameter {name} is on {param.device}, expected {self.device}")
+            # for name, buf in ddpm.named_buffers():
+            #     print(f"GPU {self.rank}: Buffer {name} is on {buf.device}")
+            #     if buf.device != self.device:
+            #         raise RuntimeError(f"Buffer {name} is on {buf.device}, expected {self.device}")
             ddpm = nn.parallel.DistributedDataParallel(
                 ddpm, 
                 device_ids=[self.rank]
@@ -175,13 +190,10 @@ class DiffusionTrainer:
         # Helper function to extract FFI numbers from a dataset
         def get_ffi_nums(dataset):
             if isinstance(dataset, Subset):
-                ffi_nums = []
-                for idx in dataset.indices:
-                    sample = dataset.dataset[idx]
-                    ffi_nums.append(sample['ffi_num'])
+                ffi_nums = [dataset.dataset.ffi_nums[idx] for idx in dataset.indices]
                 return ffi_nums
             else:
-                return [dataset[idx]['ffi_num'] for idx in range(len(dataset))]
+                return list(dataset.ffi_nums)
         
         # Extract FFI numbers for each split
         training_dataset_ffis = get_ffi_nums(self.train_dataset)
@@ -200,7 +212,7 @@ class DiffusionTrainer:
         """
         Save model configuration information to a text file.
         """
-        # Only save if this is the main process
+        # Only save if this is the main process 
         if self.rank != 0:
             return
             
@@ -306,8 +318,8 @@ class DiffusionTrainer:
             self.optimizer.zero_grad()
             
             # Move data to device
-            x_train = data_batch['y'].to(self.device)
-            c_train = data_batch['x'].to(self.device)
+            x_train = data_batch['y'].to(self.device, non_blocking=True)
+            c_train = data_batch['x'].to(self.device, non_blocking=True)
             
             # Forward pass and loss calculation
             loss_train = self.model(x_train, c_train)
@@ -348,8 +360,8 @@ class DiffusionTrainer:
         with torch.no_grad():
             for data_batch in tqdm(self.valid_loader, desc=f"Validation epoch {self.current_epoch}"):
                 # Move data to device
-                x_valid = data_batch['y'].to(self.device)
-                c_valid = data_batch['x'].to(self.device)
+                x_valid = data_batch['y'].to(self.device, non_blocking=True)
+                c_valid = data_batch['x'].to(self.device, non_blocking=True)
                 
                 # Forward pass and loss calculation
                 loss_valid = self.model(x_valid, c_valid)

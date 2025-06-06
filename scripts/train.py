@@ -11,8 +11,9 @@ import argparse
 import datetime
 import torch
 import torch.multiprocessing as mp
+import time
 
-from beam.data.datasets import TESSDataset, create_train_valid_datasets
+from beam.data.datasets import TESSDataset, create_train_valid_datasets_by_orbit
 from beam.training.trainer import DiffusionTrainer
 from beam.training.distributed import run_distributed
 from beam.utils.config import load_config, prepare_training_config
@@ -45,30 +46,25 @@ def prepare_dataset(config):
         Tuple of (training dataset, validation dataset)
     """
     # Create dataset
-    print(f"Creating TESSDataset using {config['data_num_processes']} processes...")
+    print(f"Creating TESSDataset...")
     tess_dataset = TESSDataset(
         angle_filename=config['data_angle_filename'],
         ccd_folder=config['data_ccd_folder'],
         image_shape=config['data_image_shape'],
         num_processes=config['data_num_processes']
     )
-    
-    # Create training and validation splits based on orbit number
-    print("Creating training and validation splits...")
-    train_split_criteria = lambda x: int(x['orbit']) <= 47
-    valid_split_criteria = lambda x: int(x['orbit']) > 47
-    
-    train_dataset, valid_dataset = create_train_valid_datasets(
-        tess_dataset, 
-        train_split_criteria, 
-        valid_split_criteria
+    presplit_time = time.time()
+    # Create training and validation splits based on orbit number (fast, metadata only)
+    print("Creating training and validation splits by orbit...")
+    train_dataset, valid_dataset = create_train_valid_datasets_by_orbit(
+        tess_dataset, orbit_threshold=47
     )
     
     # Print dataset statistics
+    print(f'Created splits in {time.time() - presplit_time:.2f} seconds')
     print(f'Full dataset has {len(tess_dataset)} datapoints')
     print(f'Training dataset has {len(train_dataset)} datapoints')
     print(f'Validation dataset has {len(valid_dataset)} datapoints')
-    
     return train_dataset, valid_dataset
 
 
@@ -107,7 +103,6 @@ def create_callbacks(config, args, rank):
             mode='min'
         )
         callbacks.append(early_stopping)
-        
         # Add Weights & Biases callback if enabled
         if args.wandb != 'disabled':
             # Get model name from config and append timestamp to create a unique run name
@@ -147,7 +142,7 @@ def train_worker(rank, world_size, config, train_dataset, valid_dataset, args, r
         device = torch.device(f'cuda:{rank}')
     
     print(f"GPU {rank}: Starting worker with {len(train_dataset)} training samples "
-          f"and {len(valid_dataset)} validation samples")
+          f"and {len(valid_dataset)} validation samples on device {device}")
     
     # Create callbacks
     callbacks = create_callbacks(config, args, rank)
@@ -179,6 +174,7 @@ def train_worker(rank, world_size, config, train_dataset, valid_dataset, args, r
 
 def main():
     """Main function to set up and launch distributed training."""
+    print("Beginning Training")
     # Parse arguments
     args = parse_args()
     

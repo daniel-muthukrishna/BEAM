@@ -36,7 +36,7 @@ def ddpm_schedules(beta1: float, beta2: float, T: int) -> Dict[str, torch.Tensor
     # Other useful values for DDPM
     sqrtab = torch.sqrt(alphabar_t)
     oneover_sqrta = 1 / torch.sqrt(alpha_t)
-    sqrtmab = torch.sqrt(1 - alphabar_t)
+    sqrtmab = torch.sqrt(1 - alphabar_t) 
     mab_over_sqrtmab = (1 - alpha_t) / sqrtmab
 
     return {
@@ -63,6 +63,7 @@ class DDPM(nn.Module):
         drop_prob: float = 0.1
     ):
         super().__init__()
+        #sending Unet to device
         self.nn_model = nn_model.to(device)
         self.n_T = n_T
         self.device = device

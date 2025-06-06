@@ -10,8 +10,8 @@ model:
 # Data parameters  
 data:
   angle_filename: "angles_O11-54_data_dic.pkl"   # Filename for angle data
-  ccd_folder: "/pdo/users/jlupoiii/TESS/data/processed_images_im64x64/"  # Folder containing processed images
-  image_shape: [64, 64]  # Shape of the images
+  ccd_folder: "/pdo/users/jlupoiii/TESS/data/processed_images_im256x256/"  # Folder containing processed images
+  image_shape: [256, 256]  # Shape of the images
   num_processes: 80      # Number of processes for parallel loading
   
 # Training parameters
@@ -25,17 +25,17 @@ training:
 checkpoint:
   save_model: true       # Save model checkpoints
   epoch_checkpoint: 100  # Save samples every N epochs
-  checkpoint_gpu: 0      # GPU ID to use for checkpoints
+  checkpoint_gpu: 1      # GPU ID to use for checkpoints
   
 # Weights & Biases parameters
 wandb:
-  enabled: true          # Enable W&B logging
+  enabled: True         # Enable W&B logging
   project: "beam-tess"   # W&B project name
   mode: "online"         # W&B mode (online, offline, disabled)
   log_freq: 50           # Log batch metrics every N batches (higher value = less traffic)
   log_samples_freq: 10   # Log sample images every N epochs
   log_model_freq: 50     # Log model weights every N epochs
-  model_name: "full-refactor-multigpu"     # Base name for the model and W&B run
+  model_name: "full-refactor-multigpu-256x256"     # Base name for the model and W&B run
   
 # Paths
 paths:
@@ -43,4 +43,4 @@ paths:
   
 # Distributed training
 distributed:
-  world_size: null       # Number of GPUs (null = auto-detect)
+  world_size: 2       # Number of GPUs (null = auto-detect)
