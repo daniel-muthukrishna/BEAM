@@ -1,0 +1,491 @@
+import argparse
+from typing import List, Optional, Generator
+import os
+import numpy as np
+import pickle
+from astropy.io import fits
+import matplotlib.pyplot as plt
+import yaml
+import multiprocessing
+from concurrent.futures import ThreadPoolExecutor, as_completed 
+from tqdm import tqdm
+
+
+def show_img(
+    arr: np.ndarray,
+    title: str = "",
+    vmin: float = 0,
+    vmax: float = 1,
+    save_path: Optional[str] = None,
+):
+    """
+    Args: the numpy array we want to show
+            the title of the image (optional)
+            the minimum value of the colorbar (optional)
+            the maximum value of the colorbar (optional)
+            the path to save the image (optional)
+    """
+    fig, ax = plt.subplots()
+    im = ax.imshow(arr, cmap="gray", vmin=vmin, vmax=vmax)
+    plt.grid(visible=False)
+    colorbar = fig.colorbar(im)
+    ax.set_title(title)
+    if save_path:
+        plt.savefig(save_path)
+    plt.close()
+
+
+def get_angle_files_from_folder(
+    folder: str, orbit_start: int, orbit_end: int
+) -> List[str]:
+    """
+    Returns a list of all desired angle files in the given folder.
+    """
+    return [os.path.join(folder, f"O{i}_altaz.out") for i in range(orbit_start, orbit_end + 1)]
+
+
+def get_fits_folders_from_root(
+    root_folder: str, orbit_start: int, orbit_end: int
+) -> List[str]:
+    """
+    Returns a list of all desired folders containing .fits files in the given folder.
+    """
+    return [os.path.join(root_folder, f"O{i}_data/") for i in range(orbit_start, orbit_end + 1)]
+
+
+class Preprocessing:
+    def __init__(
+        self,
+        fits_root_folder,
+        angle_folder,
+        ccd_folder,
+        background_ccd_folder,
+        raw_angles_folder,
+        angle_file,
+        display_images_folder,
+        image_size,
+        num_workers=1,
+        orbit_start=9,
+        orbit_end=64
+    ):
+        self.fits_root_folder = fits_root_folder
+        self.angle_folder = angle_folder
+        self.ccd_folder = ccd_folder
+        self.background_ccd_folder = background_ccd_folder
+        self.raw_angles_folder = raw_angles_folder
+        self.angle_file = angle_file
+        self.display_images_folder = display_images_folder
+        self.image_size = image_size
+        self.num_workers = num_workers
+        self.data_dic = {}  # Dictionary of ffi->orbit->data stored in the angle file
+        self.orbit_start = orbit_start
+        self.orbit_end = orbit_end
+        # creates folders if they don't exist
+        os.makedirs(self.ccd_folder, exist_ok=True)
+        if self.display_images_folder:
+            os.makedirs(self.display_images_folder, exist_ok=True)
+        os.makedirs(self.angle_folder, exist_ok=True)
+        os.makedirs(self.background_ccd_folder, exist_ok=True)
+
+        # Generate the raw angle files + fits folders
+        self.fits_folder_paths = get_fits_folders_from_root(self.fits_root_folder, self.orbit_start, self.orbit_end)
+        self.raw_angles_file_paths = get_angle_files_from_folder(self.raw_angles_folder, self.orbit_start, self.orbit_end)
+        if not self.raw_angles_file_paths:
+            print(f"Warning: No .out files found in {self.raw_angles_folder}!")
+        if not self.fits_folder_paths:
+            print(
+                f"Warning: No folders containing .fits files found in {self.fits_root_folder}!"
+            )
+
+    def get_arr(self, fits_filename: str, fits_folder_path: str) -> np.ndarray:
+        """
+        Args: the name of the fits file we need to get info out of
+                the path to the fodler where the fits file is in
+        Returns: numpy array of four ccd images
+        """
+        return fits.getdata(os.path.join(fits_folder_path, fits_filename), ext=0)
+    
+    # ANGLE PROCESSING
+    def process_angles(self, save=True):
+        """
+        Args: whether to save the angle file
+        Returns: None
+        Processes the angles in the angle file and saves the data to the class
+        """
+        # loop through all the angle files (by orbit)
+        for file_path in self.raw_angles_file_paths:
+            orbit = file_path[36:38] if file_path[38] == "_" else file_path[36:37]
+            with open(file_path, "r") as file:
+                # get the data from the file
+                for line in file.read().split("\n")[1:]:
+                    arr = line.strip().split()
+                    if len(arr) < 2:
+                        break
+                    arr = [
+                        float(arr[i]) if i > 0 else str(arr[i]) for i in range(len(arr))
+                    ]
+                    ffi = arr[0]
+
+                    # fucntion that edits values and rounds to 5 digits
+                    deg_to_rad = lambda x: round(x * np.pi / 180, 5)
+                    dist_scaled_inverse = lambda x: round(1 / (x / 50), 5)
+                    dist_scaled_inverse_sqrd = lambda x: round(1 / (x / 50) ** 2, 5)
+
+                    # creates dictionary of values for each ffi
+                    data_dic = {}
+                    data_dic["ffi"] = ffi
+                    data_dic["orbit"] = str(orbit)
+                    data_dic["1/ED"] = dist_scaled_inverse(arr[1])
+                    data_dic["1/MD"] = dist_scaled_inverse(arr[2])
+                    data_dic["1/ED^2"] = dist_scaled_inverse_sqrd(arr[1])
+                    data_dic["1/MD^2"] = dist_scaled_inverse_sqrd(arr[2])
+                    data_dic["Eel"] = deg_to_rad(arr[3])
+                    data_dic["Eaz"] = deg_to_rad(arr[4])
+                    data_dic["Mel"] = deg_to_rad(arr[5])
+                    data_dic["Maz"] = deg_to_rad(arr[6])
+                    data_dic["E3el"] = deg_to_rad(arr[11])
+                    data_dic["E3az"] = deg_to_rad(arr[12])
+                    data_dic["M3el"] = deg_to_rad(arr[19])
+                    data_dic["M3az"] = deg_to_rad(arr[20])
+                    data_dic["below_sunshade"] = arr[3] < -5 and arr[5] < -5
+
+                    # saves dictionary of dictionaries to the class
+                    self.data_dic[ffi] = data_dic
+        print(f"Dataset size: {len(self.data_dic)}")
+
+        # saves dictionary to computer
+        if save:
+            with open(os.path.join(self.angle_folder, self.angle_file), "wb") as file:
+                pickle.dump(self.data_dic, file)
+                print(f"Saved angle file to: {file.name}")
+        print("Finished processing angles.")
+
+    # BACKGROUND CREATION
+    def create_backgrounds_by_orbit(self):
+        """
+        Args: None
+        Returns: None
+        Parallelizes over orbits via calls to background_orbit_worker
+        """
+        # Same as in the notebook, but parallelized over orbits
+        rows_to_delete = range(2048, 2108)
+        columns_to_delete = (
+            list(range(0, 44)) + list(range(2092, 2180)) + list(range(4228, 4272))
+        )
+        # Group FFIs by orbit using self.data_dic
+        orbit_to_folder = {}
+        for i, folder_path in enumerate(self.fits_folder_paths):
+            orbit = (
+                folder_path[27:29]
+                if len(folder_path) > 29 and folder_path[29] == "_"
+                else folder_path[27:28]
+            )
+            orbit_to_folder[orbit] = (folder_path, i)
+        # Prepare args for each orbit
+        orbit_args = []
+        for orbit, (folder_path, i) in orbit_to_folder.items():
+            orbit_args.append(
+                (self, folder_path, orbit, i, rows_to_delete, columns_to_delete)
+            )
+        with multiprocessing.Pool(self.num_workers) as pool:
+            for _ in tqdm(pool.imap_unordered(Preprocessing.background_orbit_worker, orbit_args), total=len(orbit_args), desc="Creating Backgrounds (by orbit)"):
+                continue
+
+    @staticmethod
+    def background_orbit_worker(args):
+        """
+        Args: the path to the folder where the fits files are in
+                the orbit number
+                the index of the folder
+                the rows to delete
+                the columns to delete
+        Returns: None
+        Sets up thread pool to process images in a given orbit in parallel via calls to background_image_worker
+        """
+        self, folder_path, orbit, i, rows_to_delete, columns_to_delete = args
+        # Collect all FFI numbers for this orbit that are below the sunshade
+        ffis_in_orbit_below_sunshade = [
+            ffi for ffi, data in self.data_dic.items()
+            if data["orbit"] == orbit and data["below_sunshade"]
+        ]
+        if not ffis_in_orbit_below_sunshade:
+            print(f"No images below sunshade in orbit {orbit}")
+            return
+        args = []
+        for fits_filename in os.listdir(folder_path):
+            if fits_filename.endswith(".fits") or fits_filename.endswith(".fits.gz"):
+                ffi_num = fits_filename[18:26]
+                if ffi_num in ffis_in_orbit_below_sunshade:
+                    args.append(
+                        (
+                            self,
+                            fits_filename,
+                            folder_path,
+                            rows_to_delete,
+                            columns_to_delete,
+                        )
+                    )
+        if not args:
+            print(f"No images below sunshade in orbit {orbit}")
+            return
+        #setup thread pool 
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            orbit_images_below_sunshade = list(ex.map(Preprocessing.background_image_worker, args))
+        orbit_images_below_sunshade = np.array(orbit_images_below_sunshade)
+        if len(orbit_images_below_sunshade) == 0:
+            print(f"No images below sunshade in orbit {orbit}")
+            return
+        arr_average = np.average(np.array(orbit_images_below_sunshade), axis=0)
+        out_path = os.path.join(
+            self.background_ccd_folder, f"O{orbit}_background_ccd.pkl"
+        )
+        with open(out_path, "wb") as file:
+            pickle.dump(arr_average, file)
+            print(f"Saved average background image to {str(file.name)}")
+        print(f"{len(orbit_images_below_sunshade)} images averaged in orbit {orbit}")
+        if self.display_images_folder and i == 0:
+            show_img(
+                arr_average,
+                title=f"Average Orbit {orbit} image below sunshade",
+                vmin=0,
+                vmax=633118,
+                save_path=os.path.join(
+                    self.display_images_folder, f"avg_orbit_{orbit}_below_sunshade.png"
+                ),
+            )
+
+    @staticmethod
+    def background_image_worker(args):
+        """
+        Args: the name of the fits file we need to get info out of
+                the path to the fodler where the fits file is in
+                the rows to delete
+                the columns to delete
+        Returns: None
+        Saves the processed image to the ccd_folder
+        """
+        self, fits_filename, folder_path, rows_to_delete, columns_to_delete = args
+        if (
+            len(fits_filename) > 40
+            and fits_filename[-7:] == "fits.gz"
+            and fits_filename[27] == "3"
+        ):
+            arr = self.get_arr(fits_filename, folder_path)
+            arr = np.delete(arr, rows_to_delete, axis=0)
+            arr = np.delete(arr, columns_to_delete, axis=1)
+            # Downsample with median
+            block = 4096 // self.image_size
+            downsampled_arr = np.zeros((self.image_size, self.image_size))
+            for x in range(self.image_size):
+                for y in range(self.image_size):
+                    downsampled_arr[x][y] = np.median(
+                        arr[block * x : block * (x + 1), block * y : block * (y + 1)]
+                    )
+            return downsampled_arr
+
+
+    # IMAGE PROCESSING
+    def images_processing_by_orbit(self):
+        """
+        Args: None
+        Returns: None
+        Creates a process for each orbit to process the images in that orbit in parallel
+        via calls to image_orbit_worker
+        """
+        rows_to_delete = range(2048, 2108)
+        columns_to_delete = list(range(0, 44)) + list(range(2092, 2180)) + list(range(4228, 4272))
+        orbit_to_folder = {}
+        for i, fits_folder in enumerate(self.fits_folder_paths):
+            orbit = (
+                fits_folder[27:29]
+                if len(fits_folder) > 29 and fits_folder[29] == "_"
+                else fits_folder[27:28]
+            )
+            orbit_to_folder[orbit] = (fits_folder, i)
+        orbit_args = []
+        for orbit, (folder_path, i) in orbit_to_folder.items():
+            orbit_args.append((self, folder_path, orbit, i, rows_to_delete, columns_to_delete))
+        with multiprocessing.Pool(self.num_workers) as pool:
+            for _ in pool.imap_unordered(Preprocessing.image_orbit_worker, orbit_args):
+                continue
+
+    @staticmethod
+    def image_orbit_worker(args):
+        """
+        Args: the path to the folder where the fits files are in
+                the orbit number
+                the index of the folder
+                the rows to delete
+                the columns to delete
+        Returns: None
+        Sets up thread pool to process images in a given orbit in parallel via calls to image_worker
+        """
+        self, folder_path, orbit, i, rows_to_delete, columns_to_delete = args
+        image_args = []
+        # Only process files from camera 3
+        for fits_filename in os.listdir(folder_path):
+            if len(fits_filename) > 40 and fits_filename[-7:] == 'fits.gz' and fits_filename[27] == '3':
+                image_args.append((self, fits_filename, folder_path, rows_to_delete, columns_to_delete))
+        if not image_args:
+            return None
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            for _ in tqdm(ex.map(Preprocessing.image_worker, image_args), total=len(image_args), desc=f"Processing Orbit {orbit} Images", position=i, leave=False):
+                continue
+
+    @staticmethod
+    def image_worker(args):
+        """
+        Args: the name of the fits file we need to get info out of
+                the path to the fodler where the fits file is in
+                the rows to delete
+                the columns to delete
+        Returns: None
+        Saves the processed image to the ccd_folder
+        """
+        self, fits_filename, folder_path, rows_to_delete, columns_to_delete = args
+        try:
+            ffi_num = fits_filename[18:26]
+            # Only process if ffi_num is in self.data_dic
+            if ffi_num not in self.data_dic:
+                return  # Skip processing if no angle data
+            arr = self.get_arr(fits_filename, folder_path)
+            # Remove black bars
+            arr = np.delete(arr, rows_to_delete, axis=0)
+            arr = np.delete(arr, columns_to_delete, axis=1)
+            # Downsample with median
+            block = 4096 // self.image_size
+            downsampled_arr = np.zeros((self.image_size, self.image_size))
+            for x in range(self.image_size):
+                for y in range(self.image_size):
+                    downsampled_arr[x, y] = np.median(
+                        arr[block * x : block * (x + 1), block * y : block * (y + 1)]
+                    )
+            arr = downsampled_arr
+
+            # Orbit mapping from notebook
+            orbit = self.data_dic[ffi_num]["orbit"]
+            orbit_to_subtract = orbit
+            if orbit == "10":
+                orbit_to_subtract = "9"
+            if orbit == "11":
+                orbit_to_subtract = "12"
+            if orbit == "13":
+                orbit_to_subtract = "14"
+            if orbit == "15":
+                orbit_to_subtract = "16"
+            if orbit == "28":
+                orbit_to_subtract = "27"
+            if orbit == "30":
+                orbit_to_subtract = "29"
+            if orbit == "32":
+                orbit_to_subtract = "31"
+            if orbit == "34":
+                orbit_to_subtract = "33"
+            if orbit == "37":
+                orbit_to_subtract = "38"
+            if orbit == "56":
+                orbit_to_subtract = "55"
+            if orbit == "60":
+                orbit_to_subtract = "59"
+            if orbit == "61":
+                orbit_to_subtract = "62"
+
+            bg_path = os.path.join(
+                self.background_ccd_folder, f"O{orbit_to_subtract}_background_ccd.pkl"
+            )
+            if os.path.exists(bg_path):
+                background_avg_image = pickle.load(open(bg_path, "rb"))
+                arr = arr - background_avg_image
+            else:
+                print(
+                    f"Warning: Background file {bg_path} not found. Skipping subtraction for {fits_filename}."
+                )
+            # Pixel scaling
+            arr *= 1 / 633118
+            # Save debug images if requested
+            if self.display_images_folder and not os.listdir(
+                self.display_images_folder
+            ):
+                show_img(
+                    arr,
+                    title=f"{ffi_num} Processed",
+                    vmin=0,
+                    vmax=1,
+                    save_path=os.path.join(
+                        self.display_images_folder,
+                        f"{ffi_num}_im{self.image_size}x{self.image_size}.png",
+                    ),
+                )
+            # Save as pickle
+            out_path = os.path.join(
+                self.ccd_folder,
+                f"{fits_filename[:-8]}_processed_im{self.image_size}x{self.image_size}.pkl",
+            )
+
+            with open(out_path, "wb") as file:
+                pickle.dump(arr, file)
+            # print(f"Saved processed image to: {out_path}")
+        except Exception as e:
+            print(f"Error processing {fits_filename}: {e}")
+
+
+
+
+
+    def run(self, process_angles=True, process_images=True, make_background=True):
+        if process_angles:
+            self.process_angles()
+        if make_background:
+            self.create_backgrounds_by_orbit()
+        if process_images:
+            self.images_processing_by_orbit()
+    
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Consolidated TESS preprocessing script for all image sizes (YAML config version, with multiprocessing support)."
+    )
+    parser.add_argument(
+        "--config", type=str, required=True, help="Path to YAML config file"
+    )
+    parser.add_argument(
+        "--no_angles", action="store_true", help="Skip angle processing"
+    )
+    parser.add_argument(
+        "--no_images", action="store_true", help="Skip image processing"
+    )
+    parser.add_argument(
+        "--no_background",
+        action="store_true",
+        help="Do not create new background images, use existing ones only",
+    )
+    args = parser.parse_args()
+
+    # Load config from YAML
+    with open(args.config, "r") as f:
+        config = yaml.safe_load(f)
+
+    preproc = Preprocessing(
+        fits_root_folder=config["fits_folder"],
+        angle_folder=config["angle_folder"],
+        ccd_folder=config["ccd_folder"],
+        background_ccd_folder=config["background_ccd_folder"],
+        raw_angles_folder=config["raw_angles_folder"],
+        angle_file=config["angle_file"],
+        display_images_folder=config.get("display_images_folder", ""),
+        image_size=config["image_size"],
+        num_workers=config.get("num_workers", 1),
+        orbit_start=config.get("orbit_start", 9),
+        orbit_end=config.get("orbit_end", 64)
+    )
+    # CLI flags 
+    preproc.run(
+        process_angles=not args.no_angles,
+        make_background= not args.no_background,
+        process_images=not args.no_images,
+    )
+
+
+if __name__ == "__main__":
+    main()

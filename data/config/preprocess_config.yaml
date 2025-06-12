@@ -1,0 +1,30 @@
+# Path to the root directory containing orbit subfolders with FITS files
+fits_folder: /pdo/users/roland/SL_data/
+
+# Path to the folder containing raw angle files 
+raw_angles_folder: /pdo/users/roland/SL_data/altazzes/
+
+# Output folder for processed angle data
+angle_folder: /pdo/users/djtufto/pptest1/angles/
+
+# Output folder for processed CCD images
+ccd_folder: /pdo/users/djtufto/pptest1/ccd/
+
+# Output folder for background images
+background_ccd_folder: /pdo/users/djtufto/pptest1/backgrounds/
+
+# Filename for processed angle data
+angle_file: angles_data_test.pkl
+
+# (Optional) folder for saving debug images ('' to disable)
+display_images_folder: ''
+
+# Target image size (
+image_size: 64
+
+# Number of workers to use
+num_workers: 50
+
+# First and last orbit number to process (inclusive)
+orbit_start: 11
+orbit_end: 54

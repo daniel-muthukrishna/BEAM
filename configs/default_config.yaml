@@ -10,14 +10,14 @@ model:
 # Data parameters  
 data:
   angle_filename: "angles_O11-54_data_dic.pkl"   # Filename for angle data
-  ccd_folder: "/pdo/users/jlupoiii/TESS/data/processed_images_im256x256/"  # Folder containing processed images
-  image_shape: [256, 256]  # Shape of the images
+  ccd_folder: "/pdo/users/jlupoiii/TESS/data/processed_images_im512x512/"  # Folder containing processed images
+  image_shape: [512, 512]  # Shape of the images
   num_processes: 80      # Number of processes for parallel loading
   
 # Training parameters
 training:
-  n_epoch: 1000          # Maximum number of epochs
-  batch_size: 16         # Batch size
+  n_epoch: 150          # Maximum number of epochs
+  batch_size: 4         # Batch size
   lrate: 0.0001          # Learning rate
   patience: 150          # Early stopping patience
   
@@ -35,7 +35,7 @@ wandb:
   log_freq: 50           # Log batch metrics every N batches (higher value = less traffic)
   log_samples_freq: 10   # Log sample images every N epochs
   log_model_freq: 50     # Log model weights every N epochs
-  model_name: "full-refactor-multigpu-256x256"     # Base name for the model and W&B run
+  model_name: "full-refactor-multigpu-512x512"     # Base name for the model and W&B run
   
 # Paths
 paths:
@@ -43,4 +43,4 @@ paths:
   
 # Distributed training
 distributed:
-  world_size: 2       # Number of GPUs (null = auto-detect)
+  world_size: null       # Number of GPUs (null = auto-detect)
