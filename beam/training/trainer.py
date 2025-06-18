@@ -17,12 +17,15 @@ import torch.nn as nn
 import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset, Subset
 from torch.utils.data.distributed import DistributedSampler
+from torchvision import datasets, utils, transforms
 from tqdm.auto import tqdm
 
 from beam.models.unet import ContextUnet
 from beam.models.diffusion import DDPM
 from beam.utils.visualization import plot_samples, plot_loss_history
 
+from beam.models.probabilitypath import GaussianProbabilityPath, LinearAlpha, LinearBeta
+from beam.models.scorematch import ScoreMatch
 
 class DiffusionTrainer:
     """
@@ -559,3 +562,62 @@ class DiffusionTrainer:
             callback.on_train_end(self)
         
         return self.loss_history_train, self.loss_history_valid
+
+if __name__ == "__main__":
+
+    batch_size = 4096
+    epochs = 1000
+    lr = 1e-3
+    n_feat = 64  
+    device = torch.device('cuda:1' if torch.cuda.is_available() else None)
+    print(f'Using device: {device}')
+    assert device.type == 'cuda'
+    print(f'Downloading data...')
+    # --- Data ---
+    transform = transforms.Compose([
+        transforms.Resize((32,32)),
+        transforms.ToTensor(),
+        transforms.Lambda(lambda x: x * 2. - 1.),  # Scale to [-1, 1]
+    ])
+    trainset = datasets.FashionMNIST(root='./data', train=True, download=True, transform=transform)
+    trainloader = DataLoader(trainset, batch_size=batch_size, shuffle=True, num_workers=2)
+    print(f'Data downloaded and loaded...')
+    # --- Model ---
+    in_channels = 1  
+    n_classes = 10   
+    unet = ContextUnet(in_channels=in_channels, in_dim=n_classes, n_feat=n_feat)
+    probability_path = GaussianProbabilityPath(alpha=LinearAlpha(), beta=LinearBeta())
+    score_match = ScoreMatch(unet, probability_path, device)
+    score_match.to(device)
+    optimizer = torch.optim.Adam(score_match.parameters(), lr=lr)
+    print("Beginning training...")
+
+    # --- Training loop ---
+    for epoch in range(epochs):
+        for i, (x, y) in enumerate(tqdm(trainloader, desc=f"Epoch {epoch}")):
+            x = x.to(device)
+
+            c = torch.zeros(x.size(0), 1, n_classes, device=device)
+            c[torch.arange(x.size(0)), 0, y] = 1
+
+            optimizer.zero_grad()
+            loss = score_match(x, c)
+            
+            loss.backward()
+            optimizer.step()
+
+            if i % 100 == 0:
+                print(f"Epoch {epoch} | Step {i} | Loss: {loss.item():.4f}")
+    torch.save(score_match.state_dict(), "/pdo/users/djtufto/score_match_test.pth")
+    print(f'Model saved to pdo/users/djtufto/score_match_test.pth')
+    # --- Sampling ---
+    # score_match.eval()
+    # with torch.no_grad():
+    #     # Generate samples for each class
+    #     c = torch.eye(n_classes).unsqueeze(1).to(device)  # (10, 1, 10)
+    #     samples, _ = ddpm.sample_c(c, n_sample=8, size=(1, 28, 28), device=device)∏
+    #     samples = (samples.clamp(-1, 1) + 1) / 2  # Back to [0, 1]
+    #     utils.save_image(samples, "fashion_mnist_ddpm_samples.png", nrow=8)
+    #     print("Saved samples to fashion_mnist_ddpm_samples.png")
+
+        
