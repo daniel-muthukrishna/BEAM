@@ -1,0 +1,51 @@
+# Default configuration for BEAM model training
+
+# Model parameters
+model:
+  n_feat: 256            # Number of features in U-Net
+  epsilon: 0.00001          # Bound t for stability
+  drop_prob: 0.1         # Dropout probability for classifier-free guidance
+  architecture: "flow"   # Architecture to use for the model
+# Data parameters  
+data:
+  angle_filename: "angles_O11-54_data_dic.pkl"   # Filename for angle data
+  ccd_folder: "/pdo/users/jlupoiii/TESS/data/processed_images_im128x128/"  # Folder containing processed images
+  image_shape: [128, 128]  # Shape of the images
+  num_processes: 80      # Number of processes for parallel loading
+
+ema:
+  beta: 0.999
+  update_after_step: 500
+  
+# Training parameters
+training:
+  n_epoch: 500          # Maximum number of epochs
+  batch_size: 108         # Batch size
+  lrate: 0.0001          # Learning rate
+  patience: 100          # Early stopping patience
+  
+# Checkpoint parameters
+checkpoint:
+  save_model: True       # Save model checkpoints
+  epoch_checkpoint: 100  # Save samples every N epochs
+  checkpoint_gpu: 1      # GPU ID to use for checkpoints
+  save_weights_only: False # Save only weights
+  save_best_only: True # Save best model only at each checkpoint. 
+  
+# Weights & Biases parameters
+wandb:
+  enabled: True         # Enable W&B logging
+  project: "beam-tess"   # W&B project name
+  mode: "online"         # W&B mode (online, offline, disabled)
+  log_freq: 50           # Log batch metrics every N batches (higher value = less traffic)
+  log_samples_freq: 25   # Log sample images every N epochs
+  log_model_freq: 50     # Log model weights every N epochs
+  model_name: "SM-128x128"     # Base name for the model and W&B run
+  
+# Paths
+paths:
+  save_dir: "model_outputs/sm_128x128/"  # Directory to save model and results
+  
+# Distributed training
+distributed:
+  world_size: 2       # Number of GPUs (null = auto-detect)

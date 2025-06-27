@@ -65,6 +65,10 @@ model_TESS_O11-54_im64x64_multipleGPUs_earlyStop_TEST/
 *.fits
 *.fits.gz
 
+# Testing
+*.png
+FashionMNIST/
+flowtest.ipynb
 
 # Cache
 *.pyc

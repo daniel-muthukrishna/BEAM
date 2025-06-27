@@ -1,7 +1,9 @@
 """
+Defining interpolant of form xt = alpha(t) * x1 + beta(t) * x0 + gamma(t) * z;  t in [0,1]
+Convention is x0 = epsilon = N(0, I), x1 = Target (data) distribution
 
+Also contains sampling methods for the interpolant path.
 """
-
 
 from abc import ABC, abstractmethod
 from typing import List, Tuple, Union, Optional
@@ -10,12 +12,9 @@ import torch.nn as nn
 import numpy as np
 
 
-
-### Defining interpolant of form xt = alpha(t) * x0 + beta(t) * x1 + gamma(t) * z;  t in [0,1]
-### Convention is x0 = epsilon = N(0, I), x1 = Target (data) distribution
 class Alpha(ABC):
     """
-    Schedule for weight of initial distribution 
+    Schedule for weight of target distribution 
     """
     def __init__(self):
         #alpha(t = 0) = 0 -> X0 is gaussian
@@ -28,13 +27,11 @@ class Alpha(ABC):
         pass
 
     def derivative(self, t: torch.Tensor) -> torch.Tensor:
-        t = t.unsqueeze(1)
-        dt = torch.func.vmap(torch.func.jacrev(self))(t)
-        return dt.view(-1, 1, 1, 1)
+        pass
 
 class Beta(ABC):
     """
-    Schedule for weight of target distribution
+    Schedule for weight of init distribution
     """
     def __init__(self):
         #beta(t = 0) = 1 -> X0 is gaussian
@@ -47,9 +44,7 @@ class Beta(ABC):
         pass
 
     def derivative(self, t: torch.Tensor) -> torch.Tensor:
-        t = t.unsqueeze(1)
-        dt = torch.func.vmap(torch.func.jacrev(self))(t)
-        return dt.view(-1, 1, 1, 1)
+        pass
 
 class Gamma(ABC):
     """
@@ -67,9 +62,7 @@ class Gamma(ABC):
         pass
 
     def derivative(self, t: torch.Tensor) -> torch.Tensor:
-        t = t.unsqueeze(1)
-        dt = torch.func.vmap(torch.func.jacrev(self))(t)
-        return dt.view(-1, 1, 1, 1)
+        pass
 
 # Specific Schedules
 class LinearAlpha(Alpha):
@@ -80,36 +73,31 @@ class LinearAlpha(Alpha):
         assert t.shape[1:] == (1,1,1)
         return t
 
-    def derivative(self, t: torch.Tensor) -> torch.Tensor:
-        assert t.shape[1:] == (1,1,1)
-        return torch.ones_like(t)
-
 class LinearBeta(Beta):
     def __call__(self, t: torch.Tensor) -> torch.Tensor:
         assert t.shape[1:] == (1,1,1)
         return 1 - t
 
-    def derivative(self, t: torch.Tensor) -> torch.Tensor:
-        assert t.shape[1:] == (1,1,1)
-        return -torch.ones_like(t)
-
 class VPAlpha(Alpha):
     def __call__(self, t: torch.Tensor) -> torch.Tensor:
         return t
 
-    def derivative(self, t: torch.Tensor) -> torch.Tensor:
-        return torch.ones_like(t)
-
 class VPBeta(Beta):
     def __call__(self, t: torch.Tensor) -> torch.Tensor:
         return torch.sqrt(1-t**2)
-
     def derivative(self, t: torch.Tensor) -> torch.Tensor:
-        return -t/(torch.sqrt(1-t**2))
+        return -t / torch.sqrt(1-t**2)
 
+class ProbabilityPath(ABC, nn.Module):
+    def __init__(self):
+        super().__init__()
+    
+    @abstractmethod
+    def sample_conditional(self, x1: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        pass
 
 # Conditional Probability Paths
-class GaussianProbabilityPath(nn.Module):
+class GaussianProbabilityPath(ProbabilityPath):
     def __init__(self, alpha: Alpha, beta: Beta):
         super().__init__()
         self.alpha = alpha
@@ -126,7 +114,8 @@ class GaussianProbabilityPath(nn.Module):
         Returns:
             x_t: (bs, c, h, w)
         """
-        return self.alpha(t) * x1 + self.beta(t) * torch.randn_like(x1)
+        epsilon = torch.randn_like(x1)
+        return self.alpha(t) * x1 + self.beta(t) * epsilon
     
     def conditional_vector_field(self, x: torch.Tensor, x1: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """
@@ -139,13 +128,14 @@ class GaussianProbabilityPath(nn.Module):
 
         Returns:
             vector_field: (bs, c, h, w)
+            beta_t: (bs, 1, 1, 1)
         """ 
         alpha_t = self.alpha(t) 
         beta_t = self.beta(t) 
         alpha_dot = self.alpha.derivative(t) 
         beta_dot = self.beta.derivative(t) 
 
-        return (alpha_dot - beta_dot / beta_t * alpha_t) * x1 + beta_dot / beta_t * x
+        return (alpha_dot - beta_dot / beta_t * alpha_t) * x1 + beta_dot / beta_t * x, beta_t
 
     def conditional_score(self, x: torch.Tensor, x1: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """

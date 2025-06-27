@@ -17,8 +17,8 @@ import io
 # Import Weights & Biases
 import wandb
 
-from beam.models.diffusion import DDPM
 
+from beam.models.scorematch import ScoreMatch
 
 def init_wandb(config: Dict[str, Any], project_name: str = "beam-tess", mode: str = "online") -> None:
     """
@@ -125,7 +125,7 @@ def log_images(
 
 
 def log_sample_images(
-    model: DDPM,
+    model: ScoreMatch,
     dataloader: DataLoader,
     device: torch.device,
     n_sample: int = 3,
@@ -149,22 +149,19 @@ def log_sample_images(
     """
     # Get a batch of data
     data_batch = next(iter(dataloader))
-    
     # Extract data (limited to n_datapoint)
     x_real = data_batch['y'][:n_datapoint].to(device)
     c_real = data_batch['x'][:n_datapoint].to(device)
     ffi_nums = data_batch['ffi_num'][:n_datapoint]
     orbits = data_batch['orbit'][:n_datapoint]
-    
     # Generate samples
     with torch.no_grad():
-        x_gen, x_gen_store, timesteps_store = model.sample_c(
+        x_gen, x_gen_store, timesteps_store = model.simulate(
             c_real, 
             n_sample, 
-            (1, image_shape[0], image_shape[1]), 
+            (image_shape[0], image_shape[1]), 
             device
         )
-    
     # Create side-by-side comparison for each datapoint
     comparison_images = []
     comparison_captions = []
@@ -178,14 +175,12 @@ def log_sample_images(
         plt.imshow(x_real[i][0].cpu().detach().numpy(), cmap='viridis', vmin=0, vmax=1)
         plt.title(f"Original\nOrbit {orbits[i]}, FFI {ffi_nums[i]}")
         plt.axis('off')
-        
         # Add generated samples
         for j in range(n_sample):
             plt.subplot(1, n_sample+1, j+2)
             plt.imshow(x_gen[i*n_sample + j][0].cpu().detach().numpy(), cmap='viridis', vmin=0, vmax=1)
             plt.title(f"Sample {j+1}")
             plt.axis('off')
-            
         plt.tight_layout()
         
         # Convert figure to image array
@@ -195,10 +190,8 @@ def log_sample_images(
         
         comparison_images.append(img_array)
         comparison_captions.append(f"Orbit {orbits[i]}, FFI {ffi_nums[i]}")
-    
     # Log the comparison images
     log_images(f"{name} Original vs Generated Samples", comparison_images, step=step, caption=comparison_captions)
-    
     # Log generation process for one sample
     if len(timesteps_store) > 8:
         indices = -np.logspace(0.2, np.log10(len(timesteps_store)), 8, dtype=int) # log scale so that earlier diffusion steps are more frequent
@@ -207,7 +200,7 @@ def log_sample_images(
     else:
         display_timesteps = timesteps_store
         display_samples = x_gen_store   
-    
+
     # Create figure for generation process
     fig = plt.figure(figsize=(16, 3))
     for idx, (ts, sample) in enumerate(zip(display_timesteps, display_samples)):
@@ -223,7 +216,7 @@ def log_sample_images(
             
         plt.axis('off')
     plt.tight_layout()
-    
+
     # Convert figure to image array
     fig.canvas.draw()
     process_img = np.array(fig.canvas.renderer.buffer_rgba())
@@ -256,18 +249,22 @@ def log_model(model: torch.nn.Module, name: str = "model") -> None:
     """
     # Get model state dict, handling DistributedDataParallel
     model_state = model.module.state_dict() if hasattr(model, 'module') else model.state_dict()
+    ema_state = model.ema.state_dict() if hasattr(model, 'ema') else None
     
     # Save model to a temporary file
     tmp_path = f"{name}.pt"
+    tmp_ema_path = f"{name}_ema.pt"
     torch.save(model_state, tmp_path)
+    torch.save(ema_state, tmp_ema_path)
     
     # Log model file
     wandb.save(tmp_path)
-    
+    wandb.save(tmp_ema_path)
     # Clean up
     if os.path.exists(tmp_path):
         os.remove(tmp_path)
-
+    if os.path.exists(tmp_ema_path):
+        os.remove(tmp_ema_path)
 
 def finish_run() -> None:
     """Finish the current W&B run."""

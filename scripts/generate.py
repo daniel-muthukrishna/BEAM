@@ -14,7 +14,8 @@ import torch
 import matplotlib.pyplot as plt
 
 from beam.models.unet import ContextUnet
-from beam.models.diffusion import DDPM
+from beam.models.probabilitypath import GaussianProbabilityPath, LinearAlpha, LinearBeta
+from beam.models.scorematch import ScoreMatch
 from beam.utils.config import load_config
 from beam.utils.visualization import plot_samples, plot_generation_process
 
@@ -59,23 +60,25 @@ def load_model(model_path, config, device):
     )
     
     # Create DDPM model
-    ddpm = DDPM(
+    flow_model = ScoreMatch(
         nn_model=unet, 
-        betas=(1e-4, 0.02), 
-        n_T=config['model_n_T'], 
+        probability_path=GaussianProbabilityPath(
+            alpha=LinearAlpha(),
+            beta=LinearBeta()
+        ),
         device=device, 
-        drop_prob=0.1
+        architecture=config['model_architecture']
     )
     
     # Load state from checkpoint
     checkpoint = torch.load(model_path, map_location=device)
     if 'model_state_dict' in checkpoint:
-        ddpm.load_state_dict(checkpoint['model_state_dict'])
+        flow_model.load_state_dict(checkpoint['model_state_dict'])
     else:
-        ddpm.load_state_dict(checkpoint)
+        flow_model.load_state_dict(checkpoint)
     
     print(f"Loaded model from {model_path}")
-    return ddpm
+    return flow_model
 
 
 def load_params(params_file, n_samples=5):
@@ -128,7 +131,7 @@ def main():
             # Generate with guidance
             x_gen, x_gen_store, timesteps_store = model.sample(
                 n_sample=params.shape[0],
-                size=(1, image_shape[0], image_shape[1]),
+                size=(image_shape[0], image_shape[1]),
                 device=device,
                 guide_w=args.guidance_scale
             )

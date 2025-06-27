@@ -1,5 +1,5 @@
 """
-Training functionality for score/flow based diffusion models.
+Training functionality for diffusion models.
 
 This module contains classes and functions for training and evaluating
 diffusion models on TESS data.
@@ -27,9 +27,9 @@ from beam.utils.visualization import plot_samples, plot_loss_history
 from beam.models.probabilitypath import GaussianProbabilityPath, LinearAlpha, LinearBeta, VPBeta
 from beam.models.scorematch import ScoreMatch, EMA
 
-class SMTrainer:
+class DiffusionTrainer:
     """
-    Trainer class for flow/score matching models.
+    Trainer class for diffusion models.
     """
     def __init__(
         self,
@@ -59,10 +59,6 @@ class SMTrainer:
         
         # Create model
         self.model = self._create_model()
-
-        # Create EMA copy of model
-        
-        self.ema = self._create_ema(beta = config['ema_beta'], update_after_step = config['ema_update_after_step'])
         
         # Create optimizer
         self.optimizer = torch.optim.Adam(
@@ -85,7 +81,7 @@ class SMTrainer:
         os.makedirs(self.save_dir, exist_ok=True)
         
         # Save dataset info
-        if rank == config['checkpoint_checkpoint_gpu']:
+        if rank == 0:
             print(f"GPU {rank}: Saving dataset splits and model info...")
             self._save_dataset_splits()
             self._save_model_info()
@@ -157,18 +153,16 @@ class SMTrainer:
             n_feat=self.config['model_n_feat']
         )
         
-        # Create score matching model
-        
-        fm = ScoreMatch(
+        # Create DDPM model
+        ddpm = DDPM(
             nn_model=unet, 
-            probability_path=GaussianProbabilityPath(alpha=LinearAlpha(), beta=LinearBeta()),
-            device=self.device,
-            drop_prob=self.config['model_drop_prob'],
-            epsilon=self.config['model_epsilon'],
-            architecture=self.config['model_architecture']
+            betas=tuple(self.config['model_betas']), 
+            n_T=self.config['model_n_T'], 
+            device=self.device, 
+            drop_prob=0.1
         )
-        fm.to(self.device)
-
+        ddpm.to(self.device)
+        
         # Wrap model for distributed training if using multiple GPUs
         if self.world_size > 1:
             # Diagnostic: print device info for all parameters and buffers
@@ -181,17 +175,12 @@ class SMTrainer:
             #     print(f"GPU {self.rank}: Buffer {name} is on {buf.device}")
             #     if buf.device != self.device:
             #         raise RuntimeError(f"Buffer {name} is on {buf.device}, expected {self.device}")
-            fm = nn.parallel.DistributedDataParallel(
-                fm, 
+            ddpm = nn.parallel.DistributedDataParallel(
+                ddpm, 
                 device_ids=[self.rank]
             )
         
-        return fm
-    def _create_ema(self, beta: float = 0.999, update_after_step: int = 0) -> EMA:
-        """
-        Create exponential moving average of model parameters.
-        """
-        return EMA(self.model, beta=beta, update_after_step=update_after_step)
+        return ddpm
     
     def _save_dataset_splits(self) -> None:
         """
@@ -235,44 +224,42 @@ class SMTrainer:
             f.write(f"Max number of epochs\t\t\t{self.config['training_n_epoch']}\n")
             f.write(f"Batch size\t\t\t\t\t\t{self.config['training_batch_size']}\n")
             f.write(f"Training/validation ratio\t\t{len(self.train_dataset) / (len(self.train_dataset) + len(self.valid_dataset)):.2f}\n")
+            f.write(f"n_T (diffusion timesteps)\t\t{self.config['model_n_T']}\n")
             f.write(f"n_feat (CNN num of features)\t{self.config['model_n_feat']}\n")
             f.write(f"Learning rate\t\t\t\t\t{self.config['training_lrate']}\n")
             f.write(f"Image size\t\t\t\t\t\t{self.config['data_image_shape']}\n")
             f.write(f"GPUs used\t\t\t\t\t\t{self.world_size}\n")
             f.write(f"Early stopping patience\t\t{self.config['training_patience']}\n")
-            f.write(f"Architecture\t\t\t\t\t{self.config['model_architecture']}\n")
         
         print(f"Model info saved to {os.path.join(self.save_dir, 'model_info.txt')}")
     
-    # Handled in callbacks.py
-    # def save_checkpoint(self, epoch: int) -> None:
-    #     """
-    #     Save a model checkpoint.
+    def save_checkpoint(self, epoch: int) -> None:
+        """
+        Save a model checkpoint.
         
-    #     Args:
-    #         epoch: Current epoch number
-    #     """
-    #     # Only save if this is the main process
-    #     if self.rank != 0:
-    #         return
+        Args:
+            epoch: Current epoch number
+        """
+        # Only save if this is the main process
+        if self.rank != 0:
+            return
             
-    #     # Get base model (remove DistributedDataParallel wrapper if needed)
-    #     model = self.model.module if isinstance(self.model, nn.parallel.DistributedDataParallel) else self.model
+        # Get base model (remove DistributedDataParallel wrapper if needed)
+        model = self.model.module if isinstance(self.model, nn.parallel.DistributedDataParallel) else self.model
         
-    #     # Save checkpoint
-    #     checkpoint_path = os.path.join(self.save_dir, f"model_epoch{epoch}.pth")
-    #     torch.save({
-    #         'epoch': epoch,
-    #         'model_state_dict': model.state_dict(),
-    #         'optimizer_state_dict': self.optimizer.state_dict(),
-    #         'train_loss': self.loss_history_train,
-    #         'valid_loss': self.loss_history_valid,
-    #         'best_valid_loss': self.best_valid_loss,
-    #         'epochs_without_improvement': self.epochs_without_improvement,
-    #         'ema_state_dict': self.ema.state_dict(),
-    #     }, checkpoint_path)
+        # Save checkpoint
+        checkpoint_path = os.path.join(self.save_dir, f"model_epoch{epoch}.pth")
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'train_loss': self.loss_history_train,
+            'valid_loss': self.loss_history_valid,
+            'best_valid_loss': self.best_valid_loss,
+            'epochs_without_improvement': self.epochs_without_improvement,
+        }, checkpoint_path)
         
-    #     print(f'Saved checkpoint to {checkpoint_path}')
+        print(f'Saved checkpoint to {checkpoint_path}')
     
     def load_checkpoint(self, checkpoint_path: str) -> None:
         """
@@ -290,17 +277,15 @@ class SMTrainer:
         # Load model and optimizer state
         model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.ema.load_state_dict(checkpoint['ema_state_dict'])
         
         # Load training state
         self.current_epoch = checkpoint['epoch'] + 1
         self.loss_history_train = checkpoint['train_loss']
         self.loss_history_valid = checkpoint['valid_loss']
-        self.time_history = checkpoint['time_history']
-        self.time_history = [i for i in range(len(self.loss_history_train))]
         self.best_valid_loss = checkpoint['best_valid_loss']
         self.epochs_without_improvement = checkpoint['epochs_without_improvement']
-    
+        
+        print(f'Loaded checkpoint from {checkpoint_path} (epoch {checkpoint["epoch"]})')
     
     def train_epoch(self) -> float:
         """
@@ -321,7 +306,7 @@ class SMTrainer:
             param_group['lr'] = self.config['training_lrate'] * (
                 1 - self.current_epoch / self.config['training_n_epoch']
             )
-        ema_weight = self.config['ema_beta']
+        
         # Training loop
         loss_ema_train = None
         
@@ -350,7 +335,7 @@ class SMTrainer:
             if loss_ema_train is None:
                 loss_ema_train = loss_train.item()
             else:
-                loss_ema_train = ema_weight * loss_ema_train + (1 - ema_weight) * loss_train.item()
+                loss_ema_train = 0.95 * loss_ema_train + 0.05 * loss_train.item()
             
             # Update batch logs
             batch_logs["batch_loss"] = loss_train.item()
@@ -374,7 +359,7 @@ class SMTrainer:
         
         # Validation loop
         loss_ema_valid = None
-        ema_weight = self.config['ema_beta']
+        
         with torch.no_grad():
             for data_batch in tqdm(self.valid_loader, desc=f"Validation epoch {self.current_epoch}"):
                 # Move data to device
@@ -388,7 +373,7 @@ class SMTrainer:
                 if loss_ema_valid is None:
                     loss_ema_valid = loss_valid.item()
                 else:
-                    loss_ema_valid = ema_weight * loss_ema_valid + (1 - ema_weight) * loss_valid.item()
+                    loss_ema_valid = 0.95 * loss_ema_valid + 0.05 * loss_valid.item()
         
         return loss_ema_valid
     
@@ -448,9 +433,8 @@ class SMTrainer:
             self._save_loss_history()
             
             # Save model
-            # Handled in callbacks.py
-            # if save_model:
-            #     self.save_checkpoint(self.current_epoch)
+            if save_model:
+                self.save_checkpoint(self.current_epoch)
             
             # Check for early stopping
             early_stop = (self.epochs_without_improvement >= self.config['training_patience'] and 

@@ -14,7 +14,7 @@ import torch.multiprocessing as mp
 import time
 
 from beam.data.datasets import TESSDataset, create_train_valid_datasets_by_orbit
-from beam.training.trainer import DiffusionTrainer
+from beam.training.trainer import SMTrainer
 from beam.training.distributed import run_distributed
 from beam.utils.config import load_config, prepare_training_config
 from beam.training.wandb_callback import WeightsAndBiasesCallback
@@ -86,12 +86,12 @@ def create_callbacks(config, args, rank):
     if rank == 0:
         # Add ModelCheckpoint callback
         checkpoint_callback = ModelCheckpoint(
-            filepath=os.path.join(config['paths_save_dir'], 'checkpoint_epoch_{epoch:03d}.pth'),
+            filepath=os.path.join(config['paths_save_dir'], 'checkpoint_epoch_{epoch:03d}_{datetime:%Y%m%d_%H%M%S}.pth'),
             monitor='valid_loss',
-            save_best_only=True,
-            save_weights_only=False,
+            save_best_only=config.get('checkpoint_save_best_only', True),
+            save_weights_only=config.get('checkpoint_save_weights_only', False),
             mode='min',
-            period=config.get('checkpoint_epoch_checkpoint', 10)
+            period=config.get('checkpoint_epoch_checkpoint', 100)
         )
         callbacks.append(checkpoint_callback)
         
@@ -148,7 +148,7 @@ def train_worker(rank, world_size, config, train_dataset, valid_dataset, args, r
     callbacks = create_callbacks(config, args, rank)
     
     # Create trainer
-    trainer = DiffusionTrainer(
+    trainer = SMTrainer(
         config=config,
         train_dataset=train_dataset,
         valid_dataset=valid_dataset,

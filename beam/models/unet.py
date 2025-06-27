@@ -166,7 +166,6 @@ class ContextUnet(nn.Module):
 
         # Reshape context for processing
         c = c.reshape((c.shape[0], c.shape[2]))
-        
         # Apply context mask for classifier-free guidance
         context_mask = context_mask.reshape((x.shape[0], c.shape[1]))
         context_mask = -1 * (1 - context_mask)  # Flip 0 <-> 1
