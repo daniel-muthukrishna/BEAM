@@ -1,0 +1,16 @@
+model:
+  n_feat: 256            # Number of features in U-Net
+  epsilon: 0.00001          # Bound t for stability
+  architecture: "flow"   # Architecture to use for the model
+
+# Used for sampling from generate.py
+generation:
+  model_path: "model_outputs/sm_128x128/checkpoint_epoch_099.pth" # Path to trained model checkpoint
+  params_file: "data/params/params_100.pkl" # Path to orbital parameters (pickle file of shape [N, 12])
+  n_sample: 1 # Number of samples per set of parameters
+  n_datapoint: 100 # Number of datapoints to sample
+  image_shape: [128, 128] # Shape of the images
+  num_timesteps: 5 # Number of timesteps to log including endpoints
+  output_dir: "model_outputs/sm_128x128/generation/" # Directory to save generated images
+  ema: False # Whether to use EMA weights for sampling
+  guidance_scale: 1.0 # Guidance scale for sampling

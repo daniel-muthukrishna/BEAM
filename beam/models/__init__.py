@@ -24,9 +24,14 @@ from beam.models.unet import (
     UnetUp,
     EmbedFC
 )
-from beam.models.diffusion import (
-    DDPM,
-    ddpm_schedules
+from beam.models.scorematch import ScoreMatch, EMA
+from beam.models.probabilitypath import GaussianProbabilityPath, LinearAlpha, LinearBeta
+from beam.models.simulator import (
+    ODE,
+    SDE,
+    ODEIntegrator,
+    EulerMaruyama,
+    PredictorCorrector,
 )
 
 __all__ = [
@@ -35,6 +40,14 @@ __all__ = [
     'UnetDown',
     'UnetUp',
     'EmbedFC',
-    'DDPM',
-    'ddpm_schedules'
+    'ScoreMatch',
+    'EMA',
+    'GaussianProbabilityPath',
+    'LinearAlpha',
+    'LinearBeta',
+    'ODE',
+    'SDE',
+    'ODEIntegrator',
+    'EulerMaruyama',
+    'PredictorCorrector',
 ]

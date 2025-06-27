@@ -1,5 +1,6 @@
 """
 Defining Score/Flow Matching loss and sampling structure
+Keeps copy of EMA weights for sampling
 """
 from typing import Dict, Tuple, Optional, Union, List
 import numpy as np
@@ -28,12 +29,12 @@ class ScoreMatch(nn.Module):
         context_mask = torch.bernoulli(torch.zeros_like(c) + self.drop_prob)
 
         # score matching obj
-        # if self.architecture == "score":
-        #     score_pred = self.nn_model(x_t, c, t, context_mask) 
-        #     score_ref, beta_t = self.probability_path.conditional_score(x_t, x, t) 
-        #     score_ref, beta_t = score_ref.detach(), beta_t.detach()
-        #     epsilon = -score_ref * beta_t #really -epsilon
-        #     batch_losses = torch.sum(torch.square(beta_t * score_pred + epsilon), dim=(1,2,3)) #minus minus
+        if self.architecture == "score":
+            score_pred = self.nn_model(x_t, c, t, context_mask) 
+            score_ref, beta_t = self.probability_path.conditional_score(x_t, x, t) 
+            score_ref, beta_t = score_ref.detach(), beta_t.detach()
+            epsilon = -score_ref * beta_t #really -epsilon
+            batch_losses = torch.sum(torch.square(beta_t * score_pred + epsilon), dim=(1,2,3)) #minus minus
 
         #flow matching obj
         if self.architecture == "flow":
@@ -73,7 +74,7 @@ class ScoreMatch(nn.Module):
         Returns:
             Tuple of (final samples, intermediate samples, timesteps))
         """
-
+        print(f'Beginning Generation of {n_sample} samples with {num_steps} timesteps')
         t0 = torch.linspace(0.0, 1.0, num_steps, device=device)
         t = t0.unsqueeze(0).expand(n_sample, num_steps) #(n_sample, num_steps)
         x0 = torch.randn(c_i.shape[0]*n_sample, 1, *size, device=device) # random noise of shape (n_sample*n_datapoint, 1, *size) 
@@ -81,11 +82,11 @@ class ScoreMatch(nn.Module):
         ode = ODE(self.nn_model, guidance_scale)
         simulator = simulator(ode, t, num_save=num_save)
         c_i = c_i.repeat_interleave(n_sample, dim=0).to(device) #(n_sample*n_datapoint, 1, *size)
-        xout = simulator.simulate(x0, c_i) #(n_sample, num_save, 1, *size)
+        xout,timesteps = simulator.simulate(x0, c_i) #(n_sample, num_save, 1, *size)
 
         final_samples = xout[-1, ...] #(n_sample, 1, *size)
-        intermediate_samples = xout[:-1, ...].cpu().numpy() #(n_sample, num_save-1, 1, *size)
-        timesteps = t0.cpu().numpy().tolist() #(num_steps)
+        intermediate_samples = xout[:, ...].cpu().numpy() #(n_sample, num_save, 1, *size)
+        timesteps = timesteps.cpu().numpy().tolist() #(num_steps)
         return final_samples, intermediate_samples, timesteps
         
 

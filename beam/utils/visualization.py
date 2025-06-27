@@ -11,12 +11,11 @@ import matplotlib.pyplot as plt
 from typing import List, Dict, Tuple, Optional
 import torch
 from torch.utils.data import DataLoader
-
-from beam.models.diffusion import DDPM
+from beam.models import ScoreMatch
 
 
 def plot_samples(
-    model: DDPM,
+    model: ScoreMatch,
     dataloader: DataLoader,
     device: torch.device,
     n_sample: int = 3,

@@ -162,6 +162,8 @@ def log_sample_images(
             (image_shape[0], image_shape[1]), 
             device
         )
+
+    print(f"x_gen: {x_gen.shape}, x_gen_store: {x_gen_store.shape}, timesteps_store: {timesteps_store.shape if isinstance(timesteps_store, np.ndarray) else len(timesteps_store)}")
     # Create side-by-side comparison for each datapoint
     comparison_images = []
     comparison_captions = []

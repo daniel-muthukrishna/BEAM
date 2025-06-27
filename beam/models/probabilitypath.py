@@ -72,15 +72,21 @@ class LinearAlpha(Alpha):
     def __call__(self, t: torch.Tensor) -> torch.Tensor:
         assert t.shape[1:] == (1,1,1)
         return t
+    def derivative(self, t: torch.Tensor) -> torch.Tensor:
+        return torch.ones_like(t)
 
 class LinearBeta(Beta):
     def __call__(self, t: torch.Tensor) -> torch.Tensor:
         assert t.shape[1:] == (1,1,1)
         return 1 - t
+    def derivative(self, t: torch.Tensor) -> torch.Tensor:
+        return -torch.ones_like(t)
 
 class VPAlpha(Alpha):
     def __call__(self, t: torch.Tensor) -> torch.Tensor:
         return t
+    def derivative(self, t: torch.Tensor) -> torch.Tensor:
+        return torch.ones_like(t)
 
 class VPBeta(Beta):
     def __call__(self, t: torch.Tensor) -> torch.Tensor:

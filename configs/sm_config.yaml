@@ -23,12 +23,12 @@ training:
   batch_size: 108         # Batch size
   lrate: 0.0001          # Learning rate
   patience: 100          # Early stopping patience
-  
+
 # Checkpoint parameters
 checkpoint:
   save_model: True       # Save model checkpoints
   epoch_checkpoint: 100  # Save samples every N epochs
-  checkpoint_gpu: 1      # GPU ID to use for checkpoints
+  checkpoint_gpu: 0      # GPU ID to use for checkpoints
   save_weights_only: False # Save only weights
   save_best_only: True # Save best model only at each checkpoint. 
   

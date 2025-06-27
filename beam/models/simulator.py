@@ -230,6 +230,7 @@ class ODEIntegrator(Simulator):
         self.num_save = num_save
     @torch.no_grad()    
     def simulate(self, x0: torch.Tensor, c: torch.Tensor):
+        print(f't: {self.t.shape}')
         ts = self.t[1] #odeint expects timem as 1d tensor
         bs = x0.shape[0]
         x = x0.clone()
@@ -240,7 +241,7 @@ class ODEIntegrator(Simulator):
             ret_idx = -1
         else:
             ret_idx = torch.linspace(0, self.num_steps-1, steps = self.num_save, device=x.device, dtype = torch.long)
-        return x[ret_idx, ...] #return last step
+        return x[ret_idx, ...], ts[ret_idx] #return last step
     
 class EulerMaruyama(Simulator):
     """

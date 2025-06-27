@@ -142,7 +142,7 @@ class WeightsAndBiasesCallback(Callback):
                     dataloader=trainer.train_loader,
                     device=trainer.device,
                     n_sample=3,
-                    n_datapoint=1,
+                    n_datapoint=2,
                     image_shape=trainer.config['data_image_shape'],
                     step=self.current_step,
                     name="Training Set"

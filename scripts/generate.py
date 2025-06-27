@@ -15,27 +15,16 @@ import matplotlib.pyplot as plt
 
 from beam.models.unet import ContextUnet
 from beam.models.probabilitypath import GaussianProbabilityPath, LinearAlpha, LinearBeta
-from beam.models.scorematch import ScoreMatch
-from beam.utils.config import load_config
+from beam.models.scorematch import ScoreMatch, EMA
+from beam.utils.config import load_config, flatten_config
 from beam.utils.visualization import plot_samples, plot_generation_process
 
 
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Generate images with the trained diffusion model")
-    
-    parser.add_argument('--model_path', type=str, required=True,
-                        help='Path to trained model checkpoint')
-    parser.add_argument('--config', type=str, default='configs/default_config.yaml',
+    parser.add_argument('--config', type=str, default='configs/generation_config.yaml',
                         help='Path to configuration YAML file')
-    parser.add_argument('--params_file', type=str, default=None,
-                        help='Path to orbital parameters (pickle file of shape [N, 12])')
-    parser.add_argument('--n_samples', type=int, default=5,
-                        help='Number of samples per set of parameters')
-    parser.add_argument('--guidance_scale', type=float, default=1.0,
-                        help='Classifier-free guidance scale')
-    parser.add_argument('--output_dir', type=str, default='generated_samples',
-                        help='Directory to save generated images')
     
     return parser.parse_args()
 
@@ -59,7 +48,7 @@ def load_model(model_path, config, device):
         n_feat=config['model_n_feat']
     )
     
-    # Create DDPM model
+    # Create model
     flow_model = ScoreMatch(
         nn_model=unet, 
         probability_path=GaussianProbabilityPath(
@@ -74,8 +63,7 @@ def load_model(model_path, config, device):
     checkpoint = torch.load(model_path, map_location=device)
     if 'model_state_dict' in checkpoint:
         flow_model.load_state_dict(checkpoint['model_state_dict'])
-    else:
-        flow_model.load_state_dict(checkpoint)
+  
     
     print(f"Loaded model from {model_path}")
     return flow_model
@@ -108,40 +96,41 @@ def main():
     
     # Load configuration
     config = load_config(args.config)
+    config = flatten_config(config)
     
     # Create output directory
-    os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(config['generation_output_dir'], exist_ok=True)
     
     # Set device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
     # Load model
-    model = load_model(args.model_path, config, device)
+    model = load_model(config['generation_model_path'], config, device)
     model.eval()
     
+    #Optionally use EMA weights for sampling
+    if config['generation_ema']:
+        model.ema.copy_to(model.nn_model)
+    
     # Load parameters
-    params = load_params(args.params_file, args.n_samples)
+    params = load_params(config['generation_params_file'], config['generation_n_sample'])
     params = params.to(device)
+
+
     
     # Generate samples
-    image_shape = config['data_image_shape']
+    image_shape = config['generation_image_shape']
     with torch.no_grad():
-        if args.guidance_scale > 0:
+        if config['generation_guidance_scale'] > 0:
             # Generate with guidance
-            x_gen, x_gen_store, timesteps_store = model.sample(
+            x_gen, x_gen_store, timesteps_store = model.simulate(
+                c_i=params,
                 n_sample=params.shape[0],
                 size=(image_shape[0], image_shape[1]),
                 device=device,
-                guide_w=args.guidance_scale
-            )
-        else:
-            # Generate conditioned on parameters
-            x_gen, x_gen_store, timesteps_store = model.sample_c(
-                c_i=params,
-                n_sample=1,
-                size=(1, image_shape[0], image_shape[1]),
-                device=device
+                guidance_scale=config['generation_guidance_scale'],
+                num_save=config['generation_num_timesteps']
             )
     
     # Plot and save results
@@ -152,7 +141,7 @@ def main():
             sample_idx=i,
             num_timesteps=8,
             title=f"Generation Process (Sample {i+1})",
-            save_path=os.path.join(args.output_dir, f"process_sample_{i+1}.png")
+            save_path=os.path.join(config['generation_output_dir'], f"process_sample_{i+1}.png")
         )
         plt.close(fig)
         
@@ -162,10 +151,10 @@ def main():
         plt.axis('off')
         plt.title(f"Generated Sample {i+1}")
         plt.tight_layout()
-        plt.savefig(os.path.join(args.output_dir, f"sample_{i+1}.png"))
+        plt.savefig(os.path.join(config['generation_output_dir'], f"sample_{i+1}.png"))
         plt.close()
     
-    print(f"Generated {params.shape[0]} samples in {args.output_dir}")
+    print(f"Generated {params.shape[0]} samples in {config['generation_output_dir']}")
 
 
 if __name__ == "__main__":

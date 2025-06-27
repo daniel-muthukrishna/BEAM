@@ -21,7 +21,6 @@ from torchvision import datasets, utils, transforms
 from tqdm.auto import tqdm
 
 from beam.models.unet import ContextUnet
-from beam.models.diffusion import DDPM
 from beam.utils.visualization import plot_samples, plot_loss_history
 
 from beam.models.probabilitypath import GaussianProbabilityPath, LinearAlpha, LinearBeta, VPBeta
@@ -139,7 +138,7 @@ class SMTrainer:
         
         return train_loader, valid_loader
     
-    def _create_model(self) -> DDPM:
+    def _create_model(self) -> ScoreMatch:
         """
         Create and initialize diffusion model.
         
@@ -282,7 +281,7 @@ class SMTrainer:
             checkpoint_path: Path to the checkpoint file
         """
         # Load checkpoint
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
         
         # Get base model (remove DistributedDataParallel wrapper if needed)
         model = self.model.module if isinstance(self.model, nn.parallel.DistributedDataParallel) else self.model
@@ -290,16 +289,16 @@ class SMTrainer:
         # Load model and optimizer state
         model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        self.ema.load_state_dict(checkpoint['ema_state_dict'])
+        # self.ema.load_state_dict(checkpoint['ema_state_dict'])
         
         # Load training state
         self.current_epoch = checkpoint['epoch'] + 1
         self.loss_history_train = checkpoint['train_loss']
         self.loss_history_valid = checkpoint['valid_loss']
-        self.time_history = checkpoint['time_history']
+        # self.time_history = checkpoint['time_history']
+        # self.best_valid_loss = checkpoint['best_valid_loss']
+        # self.epochs_without_improvement = checkpoint['epochs_without_improvement']
         self.time_history = [i for i in range(len(self.loss_history_train))]
-        self.best_valid_loss = checkpoint['best_valid_loss']
-        self.epochs_without_improvement = checkpoint['epochs_without_improvement']
     
     
     def train_epoch(self) -> float:
@@ -505,7 +504,7 @@ class SMTrainer:
         # Call on_train_begin callbacks
         for callback in self.callbacks:
             callback.on_train_begin(self)
-        
+       
         # Training loop
         for epoch in range(self.current_epoch, n_epoch):
             self.current_epoch = epoch
