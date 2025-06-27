@@ -1,0 +1,21 @@
+name: beam
+channels:
+  - conda-forge
+dependencies:
+  - astropy
+  - black
+  - cudatoolkit=11.8
+  - ipykernel
+  - matplotlib
+  - notebook
+  - numpy
+  - python=3.9.23
+  - pytorch-gpu=2.4.1
+  - pyyaml
+  - scipy
+  - torchdiffeq
+  - torchvision
+  - tqdm
+  - wandb
+
+
