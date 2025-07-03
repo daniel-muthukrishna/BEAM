@@ -3,14 +3,20 @@ model:
   epsilon: 0.00001          # Bound t for stability
   architecture: "flow"   # Architecture to use for the model
 
+data:
+  angle_path: "/pdo/users/jlupoiii/TESS/data/angles/angles_O11-54_data_dic.pkl"  # Path to angle data
+  ccd_folder: "/pdo/users/jlupoiii/TESS/data/processed_images_im128x128"  # Folder containing processed images
+  image_shape: [128, 128]  # Shape of the images
+  num_processes: 80      # Number of processes for parallel loading
+
 # Used for sampling from generate.py
 generation:
-  model_path: "model_outputs/sm_128x128/checkpoint_epoch_099.pth" # Path to trained model checkpoint
+  model_path: "/pdo/users/djtufto/BEAM/model_outputs/sm_128x128/checkpoint_epoch_599_20250702_054254.pth" # Path to trained model checkpoint
   params_file: "data/params/params_100.pkl" # Path to orbital parameters (pickle file of shape [N, 12])
-  n_sample: 1 # Number of samples per set of parameters
-  n_datapoint: 100 # Number of datapoints to sample
-  image_shape: [128, 128] # Shape of the images
+  n_datapoint: 50 # Number of datapoints (sets of parameters) to sample
+  n_sample: 2 # Number of samples per datapoint
   num_timesteps: 5 # Number of timesteps to log including endpoints
-  output_dir: "model_outputs/sm_128x128/generation/" # Directory to save generated images
-  ema: False # Whether to use EMA weights for sampling
-  guidance_scale: 1.0 # Guidance scale for sampling
+  image_shape: [128, 128] # Shape of the images
+  output_dir: "model_outputs/sm_128x128/generation_valid/" # Directory to save generated images
+  ema: False # Use EMA weights for sampling
+  guidance_scale: 0.9 # Guidance scale for sampling

@@ -192,7 +192,7 @@ class ModelCheckpoint(Callback):
             if hasattr(model, 'module'):
                 model = model.module
             ema = trainer.ema
-            torch.save({'model_state_dict': model.state_dict(), 'ema_state_dict': ema.state_dict()}, filepath)
+            torch.save({'model_state_dict': model.state_dict(), 'ema_state_dict': ema.state_dict(), 'scaler_state_dict': trainer.scaler.state_dict() if trainer.config['training_mixed_precision'] else None}, filepath)
         else:
             # Save full checkpoint
             checkpoint = {
@@ -206,7 +206,8 @@ class ModelCheckpoint(Callback):
                 'time_history': trainer.time_history,
                 'best_valid_loss': trainer.best_valid_loss,
                 'epochs_without_improvement': trainer.epochs_without_improvement,
-                'ema_state_dict': trainer.ema.state_dict() 
+                'ema_state_dict': trainer.ema.state_dict(),
+                'scaler_state_dict': trainer.scaler.state_dict() if trainer.config['training_mixed_precision'] else None
             }
             torch.save(checkpoint, filepath)
 

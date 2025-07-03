@@ -172,8 +172,9 @@ def plot_loss_history(
 
 def plot_generation_process(
     x_gen_store: np.ndarray,
+    timesteps: np.ndarray,
+    num_timesteps: int,
     sample_idx: int = 0,
-    num_timesteps: int = 8,
     title: str = "Diffusion Generation Process",
     save_path: Optional[str] = None
 ) -> plt.Figure:
@@ -191,19 +192,21 @@ def plot_generation_process(
         Matplotlib Figure object
     """
     # Select timesteps to display
-    if len(x_gen_store) <= num_timesteps:
-        timesteps = range(len(x_gen_store))
-    else:
-        # Evenly spaced timesteps
-        timesteps = np.linspace(0, len(x_gen_store) - 1, num_timesteps, dtype=int)
+    if len(timesteps) > num_timesteps:
+        timesteps = np.linspace(0, 1, len(x_gen_store))
+    #Use all timesteps if num_timesteps 
+
+
+    idx = np.linspace(0, len(timesteps) - 1, num_timesteps, dtype=int)
+
     
     # Create figure
     fig, axes = plt.subplots(1, len(timesteps), figsize=(2*len(timesteps), 3))
     
     # Display each timestep
-    for i, t in enumerate(timesteps):
+    for i in idx:
         axes[i].imshow(
-            x_gen_store[t, sample_idx, 0], 
+            x_gen_store[i, sample_idx, 0], 
             cmap='viridis', 
             vmin=0, 
             vmax=1
@@ -214,7 +217,7 @@ def plot_generation_process(
         elif i == len(timesteps) - 1:
             axes[i].set_title("Final", fontsize=10)
         else:
-            axes[i].set_title(f"Step {t}", fontsize=10)
+            axes[i].set_title(f"Step {timesteps[i]}", fontsize=10)
     
     # Set overall title
     fig.suptitle(title, fontsize=14)

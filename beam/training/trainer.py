@@ -18,6 +18,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset, Subset
 from torch.utils.data.distributed import DistributedSampler
 from torchvision import datasets, utils, transforms
+from torch.amp import autocast, GradScaler
 from tqdm.auto import tqdm
 
 from beam.models.unet import ContextUnet
@@ -63,6 +64,11 @@ class SMTrainer:
         
         self.ema = self._create_ema(beta = config['ema_beta'], update_after_step = config['ema_update_after_step'])
         
+        if config['training_mixed_precision']:
+            self.scaler = GradScaler()
+        else:
+            self.scaler = None
+            
         # Create optimizer
         self.optimizer = torch.optim.Adam(
             self.model.parameters(), 
@@ -240,6 +246,7 @@ class SMTrainer:
             f.write(f"GPUs used\t\t\t\t\t\t{self.world_size}\n")
             f.write(f"Early stopping patience\t\t{self.config['training_patience']}\n")
             f.write(f"Architecture\t\t\t\t\t{self.config['model_architecture']}\n")
+            f.write(f"Mixed precision\t\t\t\t{self.config['training_mixed_precision']}\n")
         
         print(f"Model info saved to {os.path.join(self.save_dir, 'model_info.txt')}")
     
@@ -295,11 +302,14 @@ class SMTrainer:
         self.current_epoch = checkpoint['epoch'] + 1
         self.loss_history_train = checkpoint['train_loss']
         self.loss_history_valid = checkpoint['valid_loss']
+        # if checkpoint['scaler_state_dict'] is not None:
+        #     self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
         # self.time_history = checkpoint['time_history']
         # self.best_valid_loss = checkpoint['best_valid_loss']
         # self.epochs_without_improvement = checkpoint['epochs_without_improvement']
         self.time_history = [i for i in range(len(self.loss_history_train))]
-    
+        
+            
     
     def train_epoch(self) -> float:
         """
@@ -339,12 +349,20 @@ class SMTrainer:
             c_train = data_batch['x'].to(self.device, non_blocking=True)
             
             # Forward pass and loss calculation
-            loss_train = self.model(x_train, c_train)
-            
-            # Backward pass
-            loss_train.backward()
-            self.optimizer.step()
-            
+            if self.config['training_mixed_precision']:
+                with autocast('cuda'):
+                    loss_train = self.model(x_train, c_train)
+                self.scaler.scale(loss_train).backward()
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+
+            else:
+                loss_train = self.model(x_train, c_train)
+                loss_train.backward()
+                self.optimizer.step()
+                
+            self.ema.update(self.model)
+                
             # Update exponential moving average of loss
             if loss_ema_train is None:
                 loss_ema_train = loss_train.item()
@@ -381,7 +399,11 @@ class SMTrainer:
                 c_valid = data_batch['x'].to(self.device, non_blocking=True)
                 
                 # Forward pass and loss calculation
-                loss_valid = self.model(x_valid, c_valid)
+                if self.config['training_mixed_precision']:
+                    with autocast('cuda'):
+                        loss_valid = self.model(x_valid, c_valid)
+                else:
+                    loss_valid = self.model(x_valid, c_valid)
                 
                 # Update exponential moving average of loss
                 if loss_ema_valid is None:
@@ -504,7 +526,31 @@ class SMTrainer:
         # Call on_train_begin callbacks
         for callback in self.callbacks:
             callback.on_train_begin(self)
-       
+        if self.rank == 0:
+            # Log training samples
+                from beam.utils.wandb_utils import log_sample_images
+                log_sample_images(
+                    model=self.model.module if isinstance(self.model, nn.parallel.DistributedDataParallel) else self.model,
+                    dataloader=self.train_loader,
+                    device=self.device,
+                    n_sample=1,
+                    n_datapoint=3,
+                    image_shape=self.config['data_image_shape'],
+                    step=self.current_epoch,
+                    name="Training Set"
+                )
+                        
+                        # Log validation samples
+                log_sample_images(
+                    model=self.model.module if isinstance(self.model, nn.parallel.DistributedDataParallel) else self.model,
+                    dataloader=self.valid_loader,
+                    device=self.device,
+                    n_sample=1,
+                    n_datapoint=3,
+                    image_shape=self.config['data_image_shape'],
+                    step=self.current_epoch,
+                    name="Validation Set"
+                        )
         # Training loop
         for epoch in range(self.current_epoch, n_epoch):
             self.current_epoch = epoch

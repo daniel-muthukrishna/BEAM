@@ -4,10 +4,10 @@ import os
 import numpy as np
 import pickle
 from astropy.io import fits
+from skimage.measure import block_reduce
 import matplotlib.pyplot as plt
 import yaml
 import multiprocessing
-from concurrent.futures import ThreadPoolExecutor, as_completed 
 from tqdm import tqdm
 
 
@@ -200,7 +200,7 @@ class Preprocessing:
                 the rows to delete
                 the columns to delete
         Returns: None
-        Sets up thread pool to process images in a given orbit in parallel via calls to background_image_worker
+        Processes background images in a given orbit sequentially 
         """
         self, folder_path, orbit, i, rows_to_delete, columns_to_delete = args
         # Collect all FFI numbers for this orbit that are below the sunshade
@@ -228,9 +228,8 @@ class Preprocessing:
         if not args:
             print(f"No images below sunshade in orbit {orbit}")
             return
-        #setup thread pool 
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            orbit_images_below_sunshade = list(ex.map(Preprocessing.background_image_worker, args))
+        # Sequentially process background images in this orbit
+        orbit_images_below_sunshade = [Preprocessing.background_image_worker(arg) for arg in args]
         orbit_images_below_sunshade = np.array(orbit_images_below_sunshade)
         if len(orbit_images_below_sunshade) == 0:
             print(f"No images below sunshade in orbit {orbit}")
@@ -281,6 +280,9 @@ class Preprocessing:
                     downsampled_arr[x][y] = np.median(
                         arr[block * x : block * (x + 1), block * y : block * (y + 1)]
                     )
+            
+            downsampled_arr_V = block_reduce(arr, block_size=(4096 // self.image_size, 4096 // self.image_size), func=np.median)
+            
             return downsampled_arr
 
 
@@ -318,7 +320,7 @@ class Preprocessing:
                 the rows to delete
                 the columns to delete
         Returns: None
-        Sets up thread pool to process images in a given orbit in parallel via calls to image_worker
+        Processes images in a given orbit sequentially (no threading)
         """
         self, folder_path, orbit, i, rows_to_delete, columns_to_delete = args
         image_args = []
@@ -328,9 +330,9 @@ class Preprocessing:
                 image_args.append((self, fits_filename, folder_path, rows_to_delete, columns_to_delete))
         if not image_args:
             return None
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            for _ in tqdm(ex.map(Preprocessing.image_worker, image_args), total=len(image_args), desc=f"Processing Orbit {orbit} Images", position=i, leave=False):
-                continue
+        # Sequentially process images in this orbit
+        for arg in tqdm(image_args, total=len(image_args), desc=f"Processing Orbit {orbit} Images", position=i, leave=False):
+            Preprocessing.image_worker(arg)
 
     @staticmethod
     def image_worker(args):
@@ -353,53 +355,56 @@ class Preprocessing:
             arr = np.delete(arr, rows_to_delete, axis=0)
             arr = np.delete(arr, columns_to_delete, axis=1)
             # Downsample with median
-            block = 4096 // self.image_size
-            downsampled_arr = np.zeros((self.image_size, self.image_size))
-            for x in range(self.image_size):
-                for y in range(self.image_size):
-                    downsampled_arr[x, y] = np.median(
-                        arr[block * x : block * (x + 1), block * y : block * (y + 1)]
-                    )
+            # block = 4096 // self.image_size
+            # downsampled_arr = np.zeros((self.image_size, self.image_size))
+            # for x in range(self.image_size):
+            #     for y in range(self.image_size):
+            #         downsampled_arr[x, y] = np.median(
+            #             arr[block * x : block * (x + 1), block * y : block * (y + 1)]
+            #         )
+            # vectorize Downsampling
+            downsampled_arr = block_reduce(arr, block_size=(4096 // self.image_size, 4096 // self.image_size), func=np.median)
             arr = downsampled_arr
+            
 
             # Orbit mapping from notebook
-            orbit = self.data_dic[ffi_num]["orbit"]
-            orbit_to_subtract = orbit
-            if orbit == "10":
-                orbit_to_subtract = "9"
-            if orbit == "11":
-                orbit_to_subtract = "12"
-            if orbit == "13":
-                orbit_to_subtract = "14"
-            if orbit == "15":
-                orbit_to_subtract = "16"
-            if orbit == "28":
-                orbit_to_subtract = "27"
-            if orbit == "30":
-                orbit_to_subtract = "29"
-            if orbit == "32":
-                orbit_to_subtract = "31"
-            if orbit == "34":
-                orbit_to_subtract = "33"
-            if orbit == "37":
-                orbit_to_subtract = "38"
-            if orbit == "56":
-                orbit_to_subtract = "55"
-            if orbit == "60":
-                orbit_to_subtract = "59"
-            if orbit == "61":
-                orbit_to_subtract = "62"
+            # orbit = self.data_dic[ffi_num]["orbit"]
+            # orbit_to_subtract = orbit
+            # if orbit == "10":
+            #     orbit_to_subtract = "9"
+            # if orbit == "11":
+            #     orbit_to_subtract = "12"
+            # if orbit == "13":
+            #     orbit_to_subtract = "14"
+            # if orbit == "15":
+            #     orbit_to_subtract = "16"
+            # if orbit == "28":
+            #     orbit_to_subtract = "27"
+            # if orbit == "30":
+            #     orbit_to_subtract = "29"
+            # if orbit == "32":
+            #     orbit_to_subtract = "31"
+            # if orbit == "34":
+            #     orbit_to_subtract = "33"
+            # if orbit == "37":
+            #     orbit_to_subtract = "38"
+            # if orbit == "56":
+            #     orbit_to_subtract = "55"
+            # if orbit == "60":
+            #     orbit_to_subtract = "59"
+            # if orbit == "61":
+            #     orbit_to_subtract = "62"
 
-            bg_path = os.path.join(
-                self.background_ccd_folder, f"O{orbit_to_subtract}_background_ccd.pkl"
-            )
-            if os.path.exists(bg_path):
-                background_avg_image = pickle.load(open(bg_path, "rb"))
-                arr = arr - background_avg_image
-            else:
-                print(
-                    f"Warning: Background file {bg_path} not found. Skipping subtraction for {fits_filename}."
-                )
+            # bg_path = os.path.join(
+            #     self.background_ccd_folder, f"O{orbit_to_subtract}_background_ccd.pkl"
+            # )
+            # if os.path.exists(bg_path):
+            #     background_avg_image = pickle.load(open(bg_path, "rb"))
+            #     arr = arr - background_avg_image
+            # else:
+            #     print(
+            #         f"Warning: Background file {bg_path} not found. Skipping subtraction for {fits_filename}."
+            #     )
             # Pixel scaling
             arr *= 1 / 633118
             # Save debug images if requested

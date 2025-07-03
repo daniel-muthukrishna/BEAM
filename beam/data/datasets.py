@@ -26,21 +26,21 @@ class TESSDataset(Dataset):
     """
     def __init__(
         self,
-        angle_filename: str,
+        angle_path: str,
         ccd_folder: str,
         image_shape: Tuple[int, int],
         num_processes: int = 20
     ):
         start_time = time.time()
         # Define paths and parameters
-        self.angle_folder = "/pdo/users/jlupoiii/TESS/data/angles/"
         self.ccd_folder = ccd_folder
         self.image_shape = image_shape
+        self.angle_path = angle_path
 
         self.length = 0
       
         # Load orbital parameter dictionary
-        self.angles_dic = pickle.load(open(os.path.join(self.angle_folder, angle_filename), "rb"))
+        self.angles_dic = pickle.load(open(self.angle_path, "rb"))
         
         # Find all valid image files that have corresponding angle data
         # store files for use in __getitem__
@@ -110,12 +110,14 @@ class TESSDataset(Dataset):
         target_transform = transforms.Compose([
             lambda s: np.array(s),
             lambda s: s.reshape(self.image_shape),  # Reshape to the target image size
-            transforms.ToTensor()
+            transforms.ToTensor(),
         ])
 
         # Apply transformations
         angles_image = transform(angles_image)
         ffi_image = target_transform(ffi_image)
+
+
 
         return {
             "x": angles_image,       # Orbital parameters (1×12 vector)

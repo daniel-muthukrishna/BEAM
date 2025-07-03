@@ -48,7 +48,7 @@ def prepare_dataset(config):
     # Create dataset
     print(f"Creating TESSDataset...")
     tess_dataset = TESSDataset(
-        angle_filename=config['data_angle_filename'],
+        angle_path=config['data_angle_path'],
         ccd_folder=config['data_ccd_folder'],
         image_shape=config['data_image_shape'],
         num_processes=config['data_num_processes']
@@ -86,7 +86,7 @@ def create_callbacks(config, args, rank):
     if rank == 0:
         # Add ModelCheckpoint callback
         checkpoint_callback = ModelCheckpoint(
-            filepath=os.path.join(config['paths_save_dir'], 'checkpoint_epoch_{epoch:03d}_{datetime:%Y%m%d_%H%M%S}.pth'),
+            filepath=os.path.join(config['paths_save_dir'], 'checkpoint_epoch_{epoch}_{datetime}.pth'),
             monitor='valid_loss',
             save_best_only=config.get('checkpoint_save_best_only', True),
             save_weights_only=config.get('checkpoint_save_weights_only', False),

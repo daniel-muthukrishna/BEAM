@@ -3,34 +3,35 @@
 # Model parameters
 model:
   n_feat: 256            # Number of features in U-Net
-  epsilon: 0.00001          # Bound t for stability
+  epsilon: 0.0001          # Bound t for stability
   drop_prob: 0.1         # Dropout probability for classifier-free guidance
   architecture: "flow"   # Architecture to use for the model
 # Data parameters  
 data:
-  angle_filename: "angles_O11-54_data_dic.pkl"   # Filename for angle data
-  ccd_folder: "/pdo/users/jlupoiii/TESS/data/processed_images_im128x128/"  # Folder containing processed images
+  angle_path: "/pdo/users/jlupoiii/TESS/data/angles/angles_O11-54_data_dic.pkl"  # Path to angle data
+  ccd_folder: "/pdo/users/jlupoiii/TESS/data/processed_images_im128x128"  # Folder containing processed images
   image_shape: [128, 128]  # Shape of the images
   num_processes: 80      # Number of processes for parallel loading
 
 ema:
-  beta: 0.999
-  update_after_step: 500
+  beta: 0.9999
+  update_after_step: 1
   
 # Training parameters
 training:
-  n_epoch: 500          # Maximum number of epochs
+  n_epoch: 1000          # Maximum number of epochs
   batch_size: 108         # Batch size
-  lrate: 0.0001          # Learning rate
-  patience: 100          # Early stopping patience
+  lrate: 0.0002          # Learning rate
+  patience: 1000          # Early stopping patience
+  mixed_precision: False # Use FP16 for training
 
 # Checkpoint parameters
 checkpoint:
-  save_model: True       # Save model checkpoints
-  epoch_checkpoint: 100  # Save samples every N epochs
+  save_model: False       # Save model checkpoints
+  epoch_checkpoint: 75  # Save samples every N epochs
   checkpoint_gpu: 0      # GPU ID to use for checkpoints
   save_weights_only: False # Save only weights
-  save_best_only: True # Save best model only at each checkpoint. 
+  save_best_only: False # Save best model only at each checkpoint. 
   
 # Weights & Biases parameters
 wandb:
@@ -44,7 +45,7 @@ wandb:
   
 # Paths
 paths:
-  save_dir: "model_outputs/sm_128x128/"  # Directory to save model and results
+  save_dir: "model_outputs/sm_128x128"  # Directory to save model and results
   
 # Distributed training
 distributed:

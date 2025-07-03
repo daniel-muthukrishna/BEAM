@@ -121,7 +121,7 @@ class GaussianProbabilityPath(ProbabilityPath):
             x_t: (bs, c, h, w)
         """
         epsilon = torch.randn_like(x1)
-        return self.alpha(t) * x1 + self.beta(t) * epsilon
+        return self.alpha(t) * x1 + self.beta(t) * epsilon, epsilon
     
     def conditional_vector_field(self, x: torch.Tensor, x1: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """

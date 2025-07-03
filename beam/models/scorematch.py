@@ -23,7 +23,7 @@ class ScoreMatch(nn.Module):
         B = x.shape[0]
         t = torch.rand(B, 1, 1, 1, device=self.device) #(BATCH_SIZE, 1, 1, 1)
         t.clamp_(min=self.epsilon, max=1-self.epsilon)  
-        x_t = self.probability_path.sample_conditional(x, t)
+        x_t,eps = self.probability_path.sample_conditional(x, t)
         
 
         context_mask = torch.bernoulli(torch.zeros_like(c) + self.drop_prob)
@@ -39,9 +39,10 @@ class ScoreMatch(nn.Module):
         #flow matching obj
         if self.architecture == "flow":
             flow_pred = self.nn_model(x_t, c, t, context_mask)
-            flow_ref, beta_t = self.probability_path.conditional_vector_field(x_t, x, t)
+            # flow_ref, beta_t = self.probability_path.conditional_vector_field(x_t, x, t)
+            flow_ref = x - eps
             flow_ref = flow_ref.detach()
-            batch_losses = torch.sum(torch.square(flow_pred - flow_ref), dim=(1,2,3))*beta_t**2
+            batch_losses = torch.sum(torch.square(flow_pred - flow_ref), dim=(1,2,3))
         else:
             raise ValueError(f"Architecture {self.architecture} must be either 'score' or 'flow'")
         
@@ -74,9 +75,8 @@ class ScoreMatch(nn.Module):
         Returns:
             Tuple of (final samples, intermediate samples, timesteps))
         """
-        print(f'Beginning Generation of {n_sample} samples with {num_steps} timesteps')
         t0 = torch.linspace(0.0, 1.0, num_steps, device=device)
-        t = t0.unsqueeze(0).expand(n_sample, num_steps) #(n_sample, num_steps)
+        t = t0.unsqueeze(0).expand(1, num_steps) #(n_sample*n_datapoint, num_steps)
         x0 = torch.randn(c_i.shape[0]*n_sample, 1, *size, device=device) # random noise of shape (n_sample*n_datapoint, 1, *size) 
 
         ode = ODE(self.nn_model, guidance_scale)
