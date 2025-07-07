@@ -208,6 +208,7 @@ class ModelCheckpoint(Callback):
                 'epochs_without_improvement': trainer.epochs_without_improvement,
                 'ema_state_dict': trainer.ema.state_dict(),
                 'scaler_state_dict': trainer.scaler.state_dict() if trainer.config['training_mixed_precision'] else None
+                
             }
             torch.save(checkpoint, filepath)
 

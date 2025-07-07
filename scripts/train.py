@@ -51,7 +51,7 @@ def prepare_dataset(config):
         angle_path=config['data_angle_path'],
         ccd_folder=config['data_ccd_folder'],
         image_shape=config['data_image_shape'],
-        num_processes=config['data_num_processes']
+        patch_size=config.get('data_patch_size', None)
     )
     presplit_time = time.time()
     # Create training and validation splits based on orbit number (fast, metadata only)

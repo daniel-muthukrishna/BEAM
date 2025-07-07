@@ -134,4 +134,3 @@ class EMA:
         self.beta, self.step, self.shadow = d["beta"], d["step"], d["shadow"]
 
 
-

@@ -132,25 +132,29 @@ class Preprocessing:
                     dist_scaled_inverse_sqrd = lambda x: round(1 / (x / 50) ** 2, 5)
 
                     # creates dictionary of values for each ffi
-                    data_dic = {}
-                    data_dic["ffi"] = ffi
-                    data_dic["orbit"] = str(orbit)
-                    data_dic["1/ED"] = dist_scaled_inverse(arr[1])
-                    data_dic["1/MD"] = dist_scaled_inverse(arr[2])
-                    data_dic["1/ED^2"] = dist_scaled_inverse_sqrd(arr[1])
-                    data_dic["1/MD^2"] = dist_scaled_inverse_sqrd(arr[2])
-                    data_dic["Eel"] = deg_to_rad(arr[3])
-                    data_dic["Eaz"] = deg_to_rad(arr[4])
-                    data_dic["Mel"] = deg_to_rad(arr[5])
-                    data_dic["Maz"] = deg_to_rad(arr[6])
-                    data_dic["E3el"] = deg_to_rad(arr[11])
-                    data_dic["E3az"] = deg_to_rad(arr[12])
-                    data_dic["M3el"] = deg_to_rad(arr[19])
-                    data_dic["M3az"] = deg_to_rad(arr[20])
-                    data_dic["below_sunshade"] = arr[3] < -5 and arr[5] < -5
+                    entry_dic = {}
+                    for i in range(1, 1024):
+                        data_dic = {}
+                        data_dic["ffi"] = ffi
+                        data_dic["orbit"] = str(orbit)
+                        data_dic["1/ED"] = dist_scaled_inverse(arr[1])
+                        data_dic["1/MD"] = dist_scaled_inverse(arr[2])
+                        data_dic["1/ED^2"] = dist_scaled_inverse_sqrd(arr[1])
+                        data_dic["1/MD^2"] = dist_scaled_inverse_sqrd(arr[2])
+                        data_dic["Eel"] = deg_to_rad(arr[3])
+                        data_dic["Eaz"] = deg_to_rad(arr[4])
+                        data_dic["Mel"] = deg_to_rad(arr[5])
+                        data_dic["Maz"] = deg_to_rad(arr[6])
+                        data_dic["E3el"] = deg_to_rad(arr[11])
+                        data_dic["E3az"] = deg_to_rad(arr[12])
+                        data_dic["M3el"] = deg_to_rad(arr[19])
+                        data_dic["M3az"] = deg_to_rad(arr[20])
+                        data_dic["below_sunshade"] = arr[3] < -5 and arr[5] < -5
+                        data_dic["patch_position"] = arr[i]
+                        entry_dic[i] = data_dic 
 
                     # saves dictionary of dictionaries to the class
-                    self.data_dic[ffi] = data_dic
+                    self.data_dic[ffi] = entry_dic
         print(f"Dataset size: {len(self.data_dic)}")
 
         # saves dictionary to computer
@@ -363,9 +367,11 @@ class Preprocessing:
             #             arr[block * x : block * (x + 1), block * y : block * (y + 1)]
             #         )
             # vectorize Downsampling
-            downsampled_arr = block_reduce(arr, block_size=(4096 // self.image_size, 4096 // self.image_size), func=np.median)
-            arr = downsampled_arr
-            
+            assert arr.shape == (4096, 4096)
+            arr = arr.astype(np.float32)
+          
+            # downsampled_arr = block_reduce(arr, block_size=(4096 // self.image_size, 4096 // self.image_size), func=np.median)
+            # arr = downsampled_arr
 
             # Orbit mapping from notebook
             # orbit = self.data_dic[ffi_num]["orbit"]
@@ -424,7 +430,7 @@ class Preprocessing:
             # Save as pickle
             out_path = os.path.join(
                 self.ccd_folder,
-                f"{fits_filename[:-8]}_processed_im{self.image_size}x{self.image_size}.pkl",
+                f"{fits_filename[:-8]}_{self.data_dic[ffi_num]['patch_position']}_processed_im{self.image_size}x{self.image_size}.pkl",
             )
 
             with open(out_path, "wb") as file:
@@ -433,17 +439,45 @@ class Preprocessing:
         except Exception as e:
             print(f"Error processing {fits_filename}: {e}")
 
+    def save_patches(self):
+        os.makedirs("/pdo/users/djtufto/data_tess_4096_raw/patches", exist_ok=True)
+        raw_images = os.listdir("/pdo/users/djtufto/data_tess_4096_raw/ccd")
+        for image in tqdm(raw_images, total=len(raw_images), desc="Saving patches"):
+            os.makedirs(os.path.join("/pdo/users/djtufto/data_tess_4096_raw/patches", image[:-4]), exist_ok=True)
+            with open(os.path.join("/pdo/users/djtufto/data_tess_4096_raw/ccd", image), "rb") as file:
+                arr = pickle.load(file)
+            PH,PW = 128,128
+            H, W = arr.shape
+            # 1) compute number of patches in H and W
+            nH, nW = H // PH, W // PW
+
+            # 2) extract patches in one go → shape (P, PH, PW), where P = nH*nW = 1024
+            patches = (
+                arr
+                .reshape(nH, PH, nW, PW)
+                .transpose(0, 2, 1, 3)
+                .reshape(nH * nW, PH, PW)
+                )
+            for i in range(patches.shape[0]):
+                patch = patches[i]
+                patch_path = os.path.join("/pdo/users/djtufto/data_tess_4096_raw/patches", image[:-4], f"patch_{i}.pkl")
+                with open(patch_path, "wb") as file:
+                    pickle.dump(patch, file)
+            
+            
+                
 
 
 
 
     def run(self, process_angles=True, process_images=True, make_background=True):
-        if process_angles:
-            self.process_angles()
-        if make_background:
-            self.create_backgrounds_by_orbit()
-        if process_images:
-            self.images_processing_by_orbit()
+        # if process_angles:
+        #     self.process_angles()
+        # if make_background:
+        #     self.create_backgrounds_by_orbit()
+        # if process_images:
+        #     self.images_processing_by_orbit()
+        self.save_patches()
     
 
 

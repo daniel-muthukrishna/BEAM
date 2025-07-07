@@ -5,13 +5,13 @@ fits_folder: /pdo/users/roland/SL_data/
 raw_angles_folder: /pdo/users/roland/SL_data/altazzes/
 
 # Output folder for processed angle data
-angle_folder: /pdo/users/djtufto/data_tess_128_nobg/angles/
+angle_folder: /pdo/users/djtufto/data_tess_4096_raw/angles/
 
 # Output folder for processed CCD images
-ccd_folder: /pdo/users/djtufto/data_tess_128_nobg/ccd128/
+ccd_folder: /pdo/users/djtufto/data_tess_4096_raw/ccd/
 
 # Output folder for background images
-background_ccd_folder: /pdo/users/djtufto/data_tess_128_nobg/backgrounds/
+background_ccd_folder: /pdo/users/djtufto/data_tess_4096_raw/backgrounds/
 
 # Filename for processed angle data
 angle_file: tess_angles_O11-54_data_dic.pkl
@@ -21,7 +21,7 @@ display_images_folder: ''
 
 # Target image size (
 
-image_size: 128
+image_size: 4096
 
 # Number of workers to use
 num_workers: 50

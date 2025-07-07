@@ -29,7 +29,7 @@ class TESSDataset(Dataset):
         angle_path: str,
         ccd_folder: str,
         image_shape: Tuple[int, int],
-        num_processes: int = 20
+        patch_size: Optional[Tuple[int, int]] = None
     ):
         start_time = time.time()
         # Define paths and parameters
@@ -38,6 +38,7 @@ class TESSDataset(Dataset):
         self.angle_path = angle_path
 
         self.length = 0
+        self.patch_size = patch_size
       
         # Load orbital parameter dictionary
         self.angles_dic = pickle.load(open(self.angle_path, "rb"))
@@ -100,7 +101,6 @@ class TESSDataset(Dataset):
         # Convert to images for consistent processing
         angles_image = Image.fromarray(params)
         ffi_image = Image.fromarray(image_arr.flatten())
-
         # Define transformations
         transform = transforms.Compose([
             transforms.ToTensor(),
@@ -117,13 +117,29 @@ class TESSDataset(Dataset):
         angles_image = transform(angles_image)
         ffi_image = target_transform(ffi_image)
 
+        if self.patch_size is not None:
+            num_patches = (self.image_shape[0]//self.patch_size[0])**2 #assume square images and patches
+            angles_image = angles_image.expand(num_patches, -1) # N x 12
+            locs = 1/num_patches*torch.arange(1, num_patches+ 1).unsqueeze(1) # N x 1 with values in [0, 1]
+            angles_image = torch.cat([angles_image, locs], dim=1)
+            # print(locs)
+            # print(angles_image)
+            
 
+            ph, pw = self.patch_size
+            sh, sw = self.patch_size 
+
+            # # Unfold the image into patches 
+            patched_ffi = ffi_image.unfold(1, ph, sh).unfold(2,pw,sw)
+            patch_shape = patched_ffi.shape #Need for reshaping back 
+
+            ffi_image = patched_ffi.contiguous().view(-1, ph, pw) # 1 x num_pixels/(ph*pw) x ph x pw; 
 
         return {
             "x": angles_image,       # Orbital parameters (1×12 vector)
             "y": ffi_image,          # Image (64×64 or other size)
             "ffi_num": ffi_num,      # FFI identification number
-            "orbit": angles["orbit"] # Orbit number
+            "orbit": angles["orbit"], # Orbit number
             }
 
 #CURRENTLY NOT USED
