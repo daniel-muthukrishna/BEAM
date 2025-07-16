@@ -15,9 +15,10 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import math
+from beam.models.simulator import ODEIntegrator, EulerMaruyama
 from beam.models.unet import ContextUnet
-from beam.models.probabilitypath import GaussianProbabilityPath, LinearAlpha, LinearBeta
-from beam.models.scorematch import ScoreMatch, EMA
+from beam.models.probabilitypath import GaussianProbabilityPath, OTAlpha, OTBeta
+from beam.models.interpolant import ScoreMatch, EMA
 from beam.utils.config import load_config, flatten_config
 from beam.utils.visualization import plot_samples, plot_generation_process
 from beam.data.datasets import TESSDataset, create_train_valid_datasets_by_orbit
@@ -53,33 +54,34 @@ def load_model(model_path, config, device):
     )
     
     # Create model
-    flow_model = ScoreMatch(
+    model = ScoreMatch(
         nn_model=unet, 
         probability_path=GaussianProbabilityPath(
-            alpha=LinearAlpha(),
-            beta=LinearBeta()
+            alpha=OTAlpha(),
+            beta=OTBeta()
         ),
         device=device, 
-        architecture=config['model_architecture']
+        architecture='flow'
     )
+
     ema = EMA(
-        model=unet,
+        model=model,
     )
 
     
     # Load state from checkpoint
     checkpoint = torch.load(model_path, map_location=device)
     if 'model_state_dict' in checkpoint:
-        flow_model.load_state_dict(checkpoint['model_state_dict'])
+        model.load_state_dict(checkpoint['model_state_dict'])
 
     # Load EMA weights
     if config['generation_ema']:
         ema.load_state_dict(checkpoint['ema_state_dict'])
-        ema.copy_to(flow_model.nn_model)
+        ema.copy_to(model.nn_model)
   
     
     print(f"Loaded model from {model_path}")
-    return flow_model
+    return model
 
 
 def load_params(params_file, n_samples=5):
@@ -103,27 +105,6 @@ def load_params(params_file, n_samples=5):
         return torch.rand((n_samples, 1, 12))
 
 
-def plot_real_and_generated(x_real, x_gen, save_path, title="Samples"):
-    n_datapoint = x_real.shape[0]
-    n_sample = x_gen.shape[0] // n_datapoint
-    image_shape = x_real.shape[-2:]
-    x_gen_view = x_gen.view(n_datapoint, n_sample, 1, *image_shape)
-    for i in range(n_datapoint):
-        ncols = n_sample + 1
-        fig, axes = plt.subplots(1, ncols, figsize=(3 * ncols, 3))
-        # Plot real image
-        axes[0].imshow(x_real[i][0].cpu().numpy(), cmap='viridis', vmin=0, vmax=1)
-        axes[0].set_title("Original")
-        axes[0].axis('off')
-        # Plot generated samples
-        for j in range(n_sample):
-            axes[j+1].imshow(x_gen_view[i][j][0].cpu().numpy(), cmap='viridis', vmin=0, vmax=1)
-            axes[j+1].set_title(f"Sample {j+1}")
-            axes[j+1].axis('off')
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_path, f"{title}_datapoint_{i+1}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"))
-        plt.close()
-
 
 def plot_real_param_and_generated(x_real, param_vec, x_gen, save_path, title="Samples"):
     """
@@ -131,9 +112,12 @@ def plot_real_param_and_generated(x_real, param_vec, x_gen, save_path, title="Sa
     param_vec: [12] torch.Tensor
     x_gen: [n_samples, 1, H, W] torch.Tensor
     """
+    if len(x_gen.shape) == 3:
+        x_gen = x_gen.unsqueeze(1)
+
     n_sample = x_gen.shape[0]
     image_shape = x_real.shape[-2:]
-    ncols = n_sample + 2  # real image + param + generated samples
+    ncols = n_sample + 1  # real image + generated samples
 
     fig, axes = plt.subplots(1, ncols, figsize=(3 * ncols, 3))
 
@@ -142,17 +126,17 @@ def plot_real_param_and_generated(x_real, param_vec, x_gen, save_path, title="Sa
     axes[0].set_title("Original")
     axes[0].axis('off')
 
-    # Param vector as text
-    param_text = "\n".join([f"{v:.3f}" for v in param_vec.cpu().numpy().flatten()])
-    axes[1].text(0.5, 0.5, param_text, fontsize=10, ha='center', va='center', family='monospace')
-    axes[1].set_title("Params")
-    axes[1].axis('off')
+    # # Param vector as text
+    # param_text = "\n".join([f"{v:.3f}" for v in param_vec.cpu().numpy().flatten()])
+    # axes[1].text(0.5, 0.5, param_text, fontsize=10, ha='center', va='center', family='monospace')
+    # axes[1].set_title("Params")
+    # axes[1].axis('off')
 
     # Generated samples
     for j in range(n_sample):
-        axes[j+2].imshow(x_gen[j][0].cpu().numpy(), cmap='viridis', vmin=0, vmax=1)
-        axes[j+2].set_title(f"Sample {j+1}")
-        axes[j+2].axis('off')
+        axes[j+1].imshow(x_gen[j][0].cpu().numpy(), cmap='viridis', vmin=0, vmax=1)
+        axes[j+1].set_title(f"Sample {j+1}")
+        axes[j+1].axis('off')
 
     plt.tight_layout()
     plt.savefig(save_path)
@@ -187,7 +171,7 @@ def main():
     angle_path = config['data_angle_path']
     ccd_folder = config['data_ccd_folder']
     image_shape = tuple(config['generation_image_shape'])
-    full_dataset = TESSDataset(angle_path, ccd_folder, image_shape)
+    full_dataset = TESSDataset(angle_path, ccd_folder, image_shape, patch_size=config['data_patch_size'], repeat_factor=config['data_repeat_factor'])
     train_dataset, valid_dataset = create_train_valid_datasets_by_orbit(full_dataset)
     train_loader = DataLoader(train_dataset, batch_size=config['generation_n_datapoint'], shuffle=True)
     valid_loader = DataLoader(valid_dataset, batch_size=config['generation_n_datapoint'], shuffle=True)
@@ -197,43 +181,49 @@ def main():
     params_train = train_batch['x'].to(device)
     x_real_train = train_batch['y'].to(device)
     # Generate and plot for training set
-    # for i in range(x_real_train.shape[0]):
-    #     param = params_train[i].unsqueeze(0)  # [1, 12]
-    #     with torch.no_grad():
-    #         x_gen, _, _ = model.simulate(
-    #             c_i=param,
-    #             n_sample=config['generation_n_sample'],
-    #             size=image_shape,
-    #             device=device,
-    #             guidance_scale=config.get('generation_guidance_scale', 1.0),
-    #             num_save=3
-    #         )
-    #     save_path = os.path.join(
-    #         config['generation_output_dir'],
-    #         f"train_real_param_gen_{i+1}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-    #     )
-    #     plot_real_param_and_generated(x_real_train[i], param[0], x_gen, save_path, title="train")
-    # Generate samples for validation set
-    params_valid = valid_batch['x'].to(device)
-    x_real_valid = valid_batch['y'].to(device)
-
-    # Generate and plot for validation set
-    for i in range(x_real_valid.shape[0]):
-        param = params_valid[i].unsqueeze(0)  # [1, 12]
+    print("Generating training set")
+    for i in range(x_real_train.shape[0]):
+        param = params_train[i].unsqueeze(0)  # [1, 12]
         with torch.no_grad():
             x_gen, _, _ = model.simulate(
                 c_i=param,
                 n_sample=config['generation_n_sample'],
                 size=image_shape,
                 device=device,
+                simulator=ODEIntegrator if config['model_architecture'] == "flow" else EulerMaruyama,
                 guidance_scale=config.get('generation_guidance_scale', 1.0),
-                num_save=3
+                num_save=3,
+                num_steps=7000,
+                epsilon=config['model_epsilon']
             )
+        x_gen = x_gen.mean(dim=0)
         save_path = os.path.join(
             config['generation_output_dir'],
-            f"valid_real_param_gen_{i+1}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            f"train_real_param_gen_{i+1}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
         )
-        plot_real_param_and_generated(x_real_valid[i], param[0], x_gen, save_path, title="valid")
+    
+        plot_real_param_and_generated(x_real_train[i], param[0], x_gen, save_path, title="train")
+    
+    # # Generate and plot for validation set
+    # params_valid = valid_batch['x'].to(device)
+    # x_real_valid = valid_batch['y'].to(device)
+    
+    # for i in range(x_real_valid.shape[0]):
+    #     param = params_valid[i].unsqueeze(0)  # [1, 12]
+    #     with torch.no_grad():
+    #         x_gen, _, _ = model.simulate(
+    #             c_i=param,
+    #             n_sample=config['generation_n_sample'],
+    #             size=image_shape,
+    #             device=device,
+    #             simulator=ODEIntegrator if config['model_architecture'] == "flow" else EulerMaruyama,
+    #             guidance_scale=config.get('generation_guidance_scale', 1.0),
+    #         )
+        # save_path = os.path.join(
+        #     config['generation_output_dir'],
+        #     f"valid_real_param_gen_{i+1}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        # )
+        # plot_real_param_and_generated(x_real_valid[i], param[0], x_gen, save_path, title="valid")
 
 
 if __name__ == "__main__":

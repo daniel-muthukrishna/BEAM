@@ -27,5 +27,5 @@ image_size: 4096
 num_workers: 50
 
 # First and last orbit number to process (inclusive)
-orbit_start: 11
+orbit_start: 10
 orbit_end: 54

@@ -6,45 +6,28 @@ from typing import Dict, Tuple, Optional, Union, List
 import numpy as np
 import torch
 import torch.nn as nn
-from .probabilitypath import GaussianProbabilityPath, LinearAlpha, LinearBeta
-from torchvision import datasets, transforms, utils
-from .simulator import Simulator, ODE, SDE, ODEIntegrator
+from beam.models.simulator import ODEIntegrator
 
-class ScoreMatch(nn.Module):
-    def __init__(self, nn_model: nn.Module, probability_path: GaussianProbabilityPath, device: torch.device, drop_prob: float = 0.1, epsilon: float = 1e-5, architecture: str = "score"):
+class SBD(nn.Module):
+    def __init__(self, nn_model: nn.Module, sde, device: torch.device, drop_prob: float = 0.1, epsilon: float = 1e-5, architecture: str = "flow"):
         super().__init__()
         self.nn_model = nn_model.to(device)
-        self.probability_path = probability_path
+        self.sde = sde
         self.drop_prob = drop_prob
         self.device = device
         self.epsilon = epsilon
         self.architecture = architecture
     def forward(self, x: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
         B = x.shape[0]
-        t = torch.rand(B, 1, 1, 1, device=self.device) #(BATCH_SIZE, 1, 1, 1)
-        t.clamp_(min=self.epsilon, max=1-self.epsilon)  
-        x_t,eps = self.probability_path.sample_conditional(x, t)
+        t = torch.rand(B, 1, 1, 1, device=self.device) * (1. - self.epsilon) + self.epsilon #(BATCH_SIZE, 1, 1, 1)
+        x_t, eps, score = self.sde.forward(x, t)
         
 
         context_mask = torch.bernoulli(torch.zeros_like(c) + self.drop_prob)
 
         # score matching obj
-        if self.architecture == "score":
-            score_pred = self.nn_model(x_t, c, t, context_mask) 
-            score_ref, beta_t = self.probability_path.conditional_score(x_t, x, t) 
-            score_ref, beta_t = score_ref.detach(), beta_t.detach()
-            epsilon = -score_ref * beta_t #really -epsilon
-            batch_losses = torch.sum(torch.square(beta_t * score_pred + epsilon), dim=(1,2,3)) #minus minus
-
-        #flow matching obj
-        if self.architecture == "flow":
-            flow_pred = self.nn_model(x_t, c, t, context_mask)
-            # flow_ref, beta_t = self.probability_path.conditional_vector_field(x_t, x, t)
-            flow_ref = x - eps
-            flow_ref = flow_ref.detach()
-            batch_losses = torch.sum(torch.square(flow_pred - flow_ref), dim=(1,2,3))
-        else:
-            raise ValueError(f"Architecture {self.architecture} must be either 'score' or 'flow'")
+        noise_pred = self.nn_model(x_t, c, t, context_mask) 
+        batch_losses = torch.sum(torch.square(noise_pred - eps), dim=(1,2,3)) #minus minus
         
         return torch.mean(batch_losses)
 
@@ -54,10 +37,11 @@ class ScoreMatch(nn.Module):
         n_sample: int, 
         size: Tuple[int, ...], 
         device: torch.device,
-        simulator: Simulator=ODEIntegrator,
+        simulator=ODEIntegrator,
         num_steps: int=1000,
         guidance_scale: float=1.0,
-        num_save: int=3
+        num_save: int=3,
+        epsilon: float=0.0001
     ) -> Tuple[torch.Tensor, np.ndarray, List[int]]:
         """
         Sample from the model with specific conditioning.
@@ -75,17 +59,18 @@ class ScoreMatch(nn.Module):
         Returns:
             Tuple of (final samples, intermediate samples, timesteps))
         """
-        t0 = torch.linspace(0.0, 1.0, num_steps, device=device)
-        t = t0.unsqueeze(0).expand(1, num_steps) #(n_sample*n_datapoint, num_steps)
-        x0 = torch.randn(c_i.shape[0]*n_sample, 1, *size, device=device) # random noise of shape (n_sample*n_datapoint, 1, *size) 
-
-        ode = ODE(self.nn_model, guidance_scale)
+       
+        
+        x0 = torch.randn(c_i.shape[0]*n_sample, 1, *size, device=device) * self.sde.sigma_max # random noise of shape (n_sample*n_datapoint, 1, *size) 
+        ode = self.sde
+        t0 = torch.linspace(1.0 - epsilon, epsilon, num_steps, device=device)
+        t = t0.unsqueeze(0).expand(1, num_steps) #(1, num_steps)
         simulator = simulator(ode, t, num_save=num_save)
+        
         c_i = c_i.repeat_interleave(n_sample, dim=0).to(device) #(n_sample*n_datapoint, 1, *size)
-        xout,timesteps = simulator.simulate(x0, c_i) #(n_sample, num_save, 1, *size)
-
+        xout, timesteps = simulator.simulate(x0, c_i) #(num_save, n_sample, 1, *size)
         final_samples = xout[-1, ...] #(n_sample, 1, *size)
-        intermediate_samples = xout[:, ...].cpu().numpy() #(n_sample, num_save, 1, *size)
+        intermediate_samples = xout.cpu().numpy() #(num_save, n_sample, 1, *size)
         timesteps = timesteps.cpu().numpy().tolist() #(num_steps)
         return final_samples, intermediate_samples, timesteps
         
@@ -134,3 +119,36 @@ class EMA:
         self.beta, self.step, self.shadow = d["beta"], d["step"], d["shadow"]
 
 
+class VESDE():
+    def __init__(self, sigma_min: float, sigma_max: float, device: torch.device, model: nn.Module, guidance_value: float):
+        super().__init__()
+        self.sigma_min = sigma_min
+        self.sigma_max = sigma_max
+        self.device = device
+        self.model = model
+        self.guidance_value = guidance_value
+    def diffusion(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        sigma = self.sigma_min * (self.sigma_max / self.sigma_min) ** t
+        return sigma * torch.sqrt(torch.tensor(2 * (np.log(self.sigma_max) - np.log(self.sigma_min)),
+                                                device=t.device))
+    
+    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        sigma = self.sigma_min * (self.sigma_max / self.sigma_min) ** t
+        noise = torch.randn_like(x)
+        x_t = x + sigma * noise
+        score = -noise / sigma
+        return x_t, noise, score
+    def reversePflow(self, x: torch.Tensor, c: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        g_t = self.diffusion(x, t)
+        context_mask = torch.cat([torch.zeros_like(c), torch.ones_like(c)], dim=0)
+        sigma = self.sigma_min * (self.sigma_max / self.sigma_min) ** t
+        c = torch.cat([c, c], dim=0)
+        x = torch.cat([x, x], dim=0)
+        t = torch.cat([t, t], dim=0)
+        noise_output = self.model(x, c, t, context_mask)
+        conditional_noise, unconditional_noise = noise_output.chunk(2, dim=0)
+        gfc_noise = (1-self.guidance_value )* unconditional_noise + self.guidance_value * conditional_noise
+        score = -gfc_noise / sigma
+        return -0.5 * (g_t ** 2)*score
+    
+    

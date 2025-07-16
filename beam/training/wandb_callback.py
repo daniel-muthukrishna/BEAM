@@ -143,7 +143,7 @@ class WeightsAndBiasesCallback(Callback):
                     device=trainer.device,
                     n_sample=3,
                     n_datapoint=2,
-                    image_shape=trainer.config['data_image_shape'],
+                    image_shape=trainer.config['data_image_shape'] if trainer.config['data_patch_size'] is None else trainer.config.get('data_patch_size'),
                     step=self.current_step,
                     name="Training Set"
                 )
@@ -155,7 +155,7 @@ class WeightsAndBiasesCallback(Callback):
                     device=trainer.device,
                     n_sample=3,
                     n_datapoint=1,
-                    image_shape=trainer.config['data_image_shape'],
+                    image_shape=trainer.config['data_image_shape'] if trainer.config['data_patch_size'] is None else trainer.config.get('data_patch_size'),
                     step=self.current_step,
                     name="Validation Set"
                 )

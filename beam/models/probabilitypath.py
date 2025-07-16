@@ -65,7 +65,7 @@ class Gamma(ABC):
         pass
 
 # Specific Schedules
-class LinearAlpha(Alpha):
+class OTAlpha(Alpha):
     """
     t.shape = (batch_size, 1, 1, 1)
     """
@@ -75,7 +75,7 @@ class LinearAlpha(Alpha):
     def derivative(self, t: torch.Tensor) -> torch.Tensor:
         return torch.ones_like(t)
 
-class LinearBeta(Beta):
+class OTBeta(Beta):
     def __call__(self, t: torch.Tensor) -> torch.Tensor:
         assert t.shape[1:] == (1,1,1)
         return 1 - t

@@ -7,8 +7,7 @@ Defining ODE and SDE classes and their corresponding simulators.
 import torch
 import torch.nn as nn
 from beam.models.unet import ContextUnet
-from beam.models.probabilitypath import Alpha, Beta, GaussianProbabilityPath, LinearAlpha, LinearBeta, VPAlpha, VPBeta
-
+from beam.models.probabilitypath import GaussianProbabilityPath, VPBeta
 from tqdm import tqdm
 from typing import Optional, Callable
 from abc import ABC, abstractmethod
@@ -16,7 +15,21 @@ from abc import ABC, abstractmethod
 from torchdiffeq import odeint
 
 # Helper functions for converting between flow and score models for gaussian paths
-def flow2score(flow_model: ContextUnet, path: GaussianProbabilityPath, alpha: Alpha, beta: Beta) -> Callable:
+
+def noise2score(noise_model: ContextUnet, path: GaussianProbabilityPath) -> Callable:
+    """
+    Args:
+        noise_model: ContextUnet
+        path: GaussianProbabilityPath
+    Returns:
+        score: Callable
+    Given a score model trained to output noise, return the score
+    """
+    def score(x: torch.Tensor, c: Optional[torch.Tensor], t: torch.Tensor, context_mask: torch.Tensor):
+        return -noise_model(x, c, t, context_mask)/path.beta(t)
+    return score
+
+def flow2score(flow_model: ContextUnet, path: GaussianProbabilityPath) -> Callable:
     """
     Args:
         flow_model: ContextUnet
@@ -28,6 +41,8 @@ def flow2score(flow_model: ContextUnet, path: GaussianProbabilityPath, alpha: Al
     Given a flow model trained to learn a gaussian path, the model can be rewritten using the schedulers to output a score model.
     """
     assert isinstance(path, GaussianProbabilityPath), "Only GaussianProbabilityPath is supported"
+    alpha = path.alpha
+    beta = path.beta
 
     def score(x: torch.Tensor, c: Optional[torch.Tensor], t: torch.Tensor, context_mask: torch.Tensor):
         alpha_t = alpha(t)
@@ -42,7 +57,7 @@ def flow2score(flow_model: ContextUnet, path: GaussianProbabilityPath, alpha: Al
         return num / den
     return score
 
-def score2flow(score_model: ContextUnet, path: GaussianProbabilityPath, alpha: Alpha, beta: Beta) -> Callable:
+def score2flow(score_model: ContextUnet, path: GaussianProbabilityPath) -> Callable:
     """
     Args:
         score_model: ContextUnet
@@ -54,15 +69,20 @@ def score2flow(score_model: ContextUnet, path: GaussianProbabilityPath, alpha: A
     Given a score model trained to learn a gaussian path, the model can be rewritten using the schedulers to output a flow model.
     """
     assert isinstance(path, GaussianProbabilityPath), "Only GaussianProbabilityPath is supported"
-
+    alpha = path.alpha
+    beta = path.beta
     @torch.no_grad()
     def flow(x: torch.Tensor, c: Optional[torch.Tensor], t: torch.Tensor, context_mask: torch.Tensor):
         score = score_model(x, c, t, context_mask)
-        alpha_t = alpha(t) 
-        da = alpha.derivative(t)
-        db = beta.derivative(t)
-        beta_t = beta(t)
-        return (beta_t**2 * da/alpha_t - db*beta_t) * score + da/alpha_t*x
+        if isinstance(beta, VPBeta):
+            return 1/t*(score + x)
+        else:
+            t = t.clamp_max(0.9998)
+            alpha_t = alpha(t)
+            da = alpha.derivative(t)
+            db = beta.derivative(t)
+            beta_t = beta(t)
+            return (beta_t**2 * da/alpha_t - db*beta_t) * score + da/alpha_t*x
     return flow
 
 class ODE():
@@ -73,7 +93,7 @@ class ODE():
         self.nn_model = nn_model
         self.guidance_value = guidance_value
     
-    def drift(self,x: torch.Tensor, c: Optional[torch.Tensor], t: torch.Tensor,):
+    def velocity_field(self,x: torch.Tensor, c: Optional[torch.Tensor], t: torch.Tensor,):
         """
         Args:
             x: torch.Tensor
@@ -203,7 +223,7 @@ class Euler(Simulator):
     def __init__(self, ode: ODE, t: torch.Tensor):
         self.ode = ode
         self.num_steps = t.shape[1]
-        self.t = t  #shape (B, num_steps)
+        self.t = t  #shape (1, num_steps)
 
     @torch.no_grad()
     def simulate(self, x0: torch.Tensor, c: torch.Tensor):
@@ -213,7 +233,7 @@ class Euler(Simulator):
             t = ts[:, k]
             h  = ts[:, k+1] - ts[:, k]
             h = h.view(-1, 1, 1, 1)
-            x = x + self.ode.drift(x, c, t[..., None, None, None]) * h
+            x = x + self.ode.velocity_field(x, c, t[..., None, None, None]) * h
         return x
 
 class ODEIntegrator(Simulator):
@@ -224,7 +244,7 @@ class ODEIntegrator(Simulator):
     def __init__(self, ode: ODE, t: torch.Tensor, method: str = "dopri5", atol: float = 1e-5, rtol: float = 1e-5, num_save: int = 1):
         self.ode = ode
         self.num_steps = t.shape[1]
-        self.t = t  #shape (B, num_steps)   
+        self.t = t  #shape (1, num_steps)   
         self.method = method
         self.atol = atol
         self.rtol = rtol
@@ -235,7 +255,7 @@ class ODEIntegrator(Simulator):
         bs = x0.shape[0]
         x = x0.clone()
         def drift_helper(t, x):
-            return self.ode.drift(x, c, t.expand(bs, 1, 1, 1))
+            return self.ode.velocity_field(x, c, t.expand(bs, 1, 1, 1)) 
         x = odeint(drift_helper, x, ts, method=self.method, atol=self.atol, rtol=self.rtol)
         if self.num_save == 1:
             ret_idx = -1
@@ -247,21 +267,42 @@ class EulerMaruyama(Simulator):
     """
     Stochastic Euler Integrator for SDEs.
     """
-    def __init__(self, sde: SDE, t: torch.Tensor):
+    def __init__(self, sde: SDE, t: torch.Tensor, num_save: int = 1):
         self.sde = sde
         self.num_steps = t.shape[1]
-        self.t = t  #shape (B, num_steps)
-
+        self.t = t   #shape (1, num_steps)
+        self.num_save = num_save
     @torch.no_grad()
     def simulate(self, x0: torch.Tensor, c: torch.Tensor):
-        ts = self.t
+        B, C, H, W = x0.shape
+        ts = self.t.expand(B, -1)
         x = x0.clone()
+        if self.num_save == 1:
+            ret_idx = torch.tensor([self.num_steps - 1], device=x.device, dtype=torch.long)
+        else:
+            ret_idx = torch.linspace(0, self.num_steps-1, steps = self.num_save, device=x.device, dtype = torch.long)
+        ret_idx.clamp_(0, self.num_steps-1)
+        xs_saved = torch.empty(
+        self.num_save, B, C, H, W,
+        device=x.device,
+        dtype=x.dtype, 
+        )
+        sv_ptr = 0
+        next_save_idx = ret_idx[sv_ptr]
         for k in tqdm(range(self.num_steps - 1)): 
             t = ts[:, k]
+            if k == next_save_idx:
+                xs_saved[sv_ptr] = x
+                sv_ptr += 1
+                if sv_ptr < self.num_save:
+                    next_save_idx = ret_idx[sv_ptr].item()
+            #update x
             h  = ts[:, k+1] - ts[:, k]
             h = h.view(-1, 1, 1, 1)
             x = x + self.sde.drift(x, c, t[..., None, None, None]) * h + self.sde.diffusion_coeff(x, t[..., None, None, None]) * torch.randn_like(x) * torch.sqrt(h)
-        return x
+        if (self.num_steps - 1) == next_save_idx:
+            xs_saved[-1] = x
+        return xs_saved, self.t[0, ret_idx]
 class PredictorCorrector(Simulator):
     """
     Uses Euler Maruyama as the update step and n steps of Langevin MCMC to correct the result. Step size
@@ -272,7 +313,7 @@ class PredictorCorrector(Simulator):
         self.num_steps = t.shape[1]
         self.num_corrections = num_corrections
         self.snr = snr
-        self.t = t  #shape (B, num_steps)
+        self.t = t  #shape (1, num_steps)
 
     @torch.no_grad()
     def simulate(self, x0: torch.Tensor, c: torch.Tensor):

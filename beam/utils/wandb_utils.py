@@ -18,7 +18,7 @@ import io
 import wandb
 
 
-from beam.models.scorematch import ScoreMatch
+from beam.models.interpolant import ScoreMatch
 
 def init_wandb(config: Dict[str, Any], project_name: str = "beam-tess", mode: str = "online") -> None:
     """
@@ -147,13 +147,14 @@ def log_sample_images(
         step: Optional step number (e.g., epoch)
         name: Name for the log (e.g., "Training Set", "Validation Set")
     """
+
     # Get a batch of data
     data_batch = next(iter(dataloader))
     # Extract data (limited to n_datapoint)
-    x_real = data_batch['y'][:n_datapoint].to(device)
-    c_real = data_batch['x'][:n_datapoint].to(device)
-    ffi_nums = data_batch['ffi_num'][:n_datapoint]
-    orbits = data_batch['orbit'][:n_datapoint]
+    x_real = data_batch['y'][:n_datapoint].to(device) if data_batch['y'].shape[1] == 1 else data_batch['y'].permute(1, 0, 2, 3)[:n_datapoint].to(device)
+    c_real = data_batch['x'][:n_datapoint].to(device) if data_batch['x'].shape[1] == 1 else data_batch['x'].permute(1, 0, 2)[:n_datapoint].to(device)
+    ffi_nums = data_batch['ffi_num'][:n_datapoint] if data_batch['x'].shape[1] == 1 else data_batch['ffi_num']*n_datapoint
+    orbits = data_batch['orbit'][:n_datapoint] if data_batch['x'].shape[1] == 1 else data_batch['orbit']*n_datapoint
     # Generate samples
     with torch.no_grad():
         x_gen, x_gen_store, timesteps_store = model.simulate(

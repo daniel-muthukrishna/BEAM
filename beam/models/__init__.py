@@ -24,8 +24,8 @@ from beam.models.unet import (
     UnetUp,
     EmbedFC
 )
-from beam.models.scorematch import ScoreMatch, EMA
-from beam.models.probabilitypath import GaussianProbabilityPath, LinearAlpha, LinearBeta
+from beam.models.interpolant import ScoreMatch, EMA
+from beam.models.probabilitypath import GaussianProbabilityPath, OTAlpha, OTBeta
 from beam.models.simulator import (
     ODE,
     SDE,
@@ -43,11 +43,8 @@ __all__ = [
     'ScoreMatch',
     'EMA',
     'GaussianProbabilityPath',
-    'LinearAlpha',
-    'LinearBeta',
     'ODE',
     'SDE',
     'ODEIntegrator',
-    'EulerMaruyama',
-    'PredictorCorrector',
+    'Simulator'
 ]

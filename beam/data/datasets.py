@@ -28,20 +28,27 @@ class TESSDataset(Dataset):
         self,
         angle_path: str,
         ccd_folder: str,
+        background_path: str,
         image_shape: Tuple[int, int],
-        patch_size: Optional[Tuple[int, int]] = None
+        patch_size: Optional[Tuple[int, int]] = None,
+        repeat_factor: int = 1
     ):
         start_time = time.time()
         # Define paths and parameters
         self.ccd_folder = ccd_folder
         self.image_shape = image_shape
         self.angle_path = angle_path
+        self.background_path = background_path
 
         self.length = 0
         self.patch_size = patch_size
+        self.repeat_factor = repeat_factor
+        if self.patch_size is not None:
+            assert self.image_shape[0] % self.patch_size[0] == 0, "Image shape must be divisible by patch size"
       
         # Load orbital parameter dictionary
         self.angles_dic = pickle.load(open(self.angle_path, "rb"))
+        self.background_dic = {int(path[1:-19]): path for path in os.listdir(self.background_path)}
         
         # Find all valid image files that have corresponding angle data
         # store files for use in __getitem__
@@ -65,7 +72,7 @@ class TESSDataset(Dataset):
 
     def __len__(self) -> int:
         """Return the number of samples in the dataset."""
-        return self.length
+        return self.length * self.repeat_factor 
         
     def __getitem__(self, idx: int) -> Dict[str, Union[torch.Tensor, str]]:
         """
@@ -81,13 +88,16 @@ class TESSDataset(Dataset):
                 - ffi_num: FFI identification number
                 - orbit: Orbit number
         """
+        start_time = time.time()
         file_path = os.path.join(self.ccd_folder, self.files[idx])
         ffi_num = self.ffi_nums[idx]
+        
 
         # Load image data
-        image_arr = pickle.load(open(file_path, "rb"))
+        # image_arr = pickle.load(open(file_path, "rb"))
         angles = self.angles_dic[ffi_num]
-
+        orbit = angles['orbit']
+        background_path = self.background_dic[int(orbit)]
         # Prepare orbital parameters (12 values)
         params = np.array([
             angles['1/ED'], angles['1/MD'], 
@@ -97,49 +107,90 @@ class TESSDataset(Dataset):
             angles['E3el'], angles['E3az'], 
             angles['M3el'], angles['M3az']
         ])
+        
 
         # Convert to images for consistent processing
-        angles_image = Image.fromarray(params)
-        ffi_image = Image.fromarray(image_arr.flatten())
-        # Define transformations
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            lambda s: s.reshape(1, angles_image.size[1])  # Reshape to 1×N tensor
-        ])
+        # angles_image = torch.from_numpy(params).unsqueeze(0)
+
         
-        target_transform = transforms.Compose([
-            lambda s: np.array(s),
-            lambda s: s.reshape(self.image_shape),  # Reshape to the target image size
-            transforms.ToTensor(),
-        ])
+        # ffi_image = Image.fromarray(image_arr.flatten())
+        # Define transformations
+        # transform = transforms.Compose([
+        #     transforms.ToTensor(),
+        #     lambda s: s.reshape(1, angles_image.size[1])  # Reshape to 1×N tensor
+        # ])
+        # print()
+        # target_transform = transforms.Compose([
+        #     lambda s: np.array(s),
+        #     lambda s: s.reshape(self.image_shape),  # Reshape to the target image size
+        #     transforms.ToTensor(),
+        # ])
 
-        # Apply transformations
-        angles_image = transform(angles_image)
-        ffi_image = target_transform(ffi_image)
-
+        # # Apply transformations
+        # angles_image = transform(angles_image)
+   
         if self.patch_size is not None:
-            num_patches = (self.image_shape[0]//self.patch_size[0])**2 #assume square images and patches
-            angles_image = angles_image.expand(num_patches, -1) # N x 12
-            locs = 1/num_patches*torch.arange(1, num_patches+ 1).unsqueeze(1) # N x 1 with values in [0, 1]
-            angles_image = torch.cat([angles_image, locs], dim=1)
-            # print(locs)
-            # print(angles_image)
-            
-
+            background_arr = np.load(background_path, mmap_mode='r')
+            image_arr = np.load(file_path, mmap_mode='r')
+            params = params.astype(np.float32, copy=False)
+            angles_image = torch.from_numpy(params).unsqueeze(0)
+            # Return one random patch:
             ph, pw = self.patch_size
-            sh, sw = self.patch_size 
+            patch_x = self.image_shape[0]//pw
+            patch_y = self.image_shape[1]//ph
+            num_patches = patch_x * patch_y #assume square images and patches so y = x
+            # patch_idx = torch.randint(num_patches, (1,))
+            patch_idx = torch.tensor(0)
+            conditioning_loc = (patch_idx + 1).unsqueeze(0) #Leave 0 for null conditioning vector
+            patch_row, patch_col = divmod(patch_idx.item(), patch_x)
+            top, left = patch_row*ph, patch_col*pw
+            ffi_image = image_arr[top:top+ph, left:left+pw]
+            background_image = background_arr[top:top+ph, left:left+pw].flatten()
+            print(background_image.shape)   
+            ffi_image = torch.from_numpy(ffi_image).unsqueeze(0)
+            # angles_image = torch.cat([angles_image, conditioning_loc/num_patches], dim = 1)
 
-            # # Unfold the image into patches 
-            patched_ffi = ffi_image.unfold(1, ph, sh).unfold(2,pw,sw)
-            patch_shape = patched_ffi.shape #Need for reshaping back 
+            # #Compute all patches
+            # ffi_image = torch.from_numpy(image_arr).unsqueeze(0)
+            # num_patches = (self.image_shape[0]//self.patch_size[0])**2 #assume square images and patches
+            # angles_image = angles_image.expand(num_patches, -1) # N x 12
+            # locs = 1/num_patches*torch.arange(1, num_patches+ 1).unsqueeze(1) # N x 1 with values in [0, 1]
+            # angles_image = torch.cat([angles_image, locs], dim=1)
+            
+            # ph, pw = self.patch_size
+            # sh, sw = self.patch_size 
 
-            ffi_image = patched_ffi.contiguous().view(-1, ph, pw) # 1 x num_pixels/(ph*pw) x ph x pw; 
+            # # # Unfold the image into patches 
+            # patched_ffi = ffi_image.unfold(1, ph, sh).unfold(2,pw,sw)
+            # patch_shape = patched_ffi.shape #Need for reshaping back 
+
+            # ffi_image = patched_ffi.contiguous().view(-1, ph, pw) # 1 x num_pixels/(ph*pw) x ph x pw; 
+        else:
+            image_arr = pickle.load(open(file_path, "rb"))
+            ffi_image = Image.fromarray(image_arr.flatten())
+            angles_image = Image.fromarray(params)
+            # Define transformations
+            transform = transforms.Compose([
+                transforms.ToTensor(),
+                lambda s: s.reshape(1, angles_image.size[1])  # Reshape to 1×N tensor
+            ])
+            target_transform = transforms.Compose([
+                lambda s: np.array(s),
+                lambda s: s.reshape(self.image_shape),  # Reshape to the target image size
+                transforms.ToTensor(),
+            ])
+
+            # Apply transformations
+            angles_image = transform(angles_image)
+            ffi_image = target_transform(ffi_image)
+
+
 
         return {
             "x": angles_image,       # Orbital parameters (1×12 vector)
             "y": ffi_image,          # Image (64×64 or other size)
             "ffi_num": ffi_num,      # FFI identification number
-            "orbit": angles["orbit"], # Orbit number
+            "orbit": orbit, # Orbit number
             }
 
 #CURRENTLY NOT USED
@@ -195,8 +246,8 @@ def create_train_valid_datasets_by_orbit(dataset: TESSDataset, orbit_threshold: 
         idx for idx, ffi_num in enumerate(dataset.ffi_nums)
         if int(dataset.angles_dic[ffi_num]["orbit"]) > orbit_threshold
     ]
-    train_dataset = Subset(dataset, train_indices)
-    valid_dataset = Subset(dataset, valid_indices)
+    train_dataset = Subset(dataset, train_indices * dataset.repeat_factor)
+    valid_dataset = Subset(dataset, valid_indices * dataset.repeat_factor)
     return train_dataset, valid_dataset
 
 
