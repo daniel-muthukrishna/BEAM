@@ -8,6 +8,93 @@ in the conditional diffusion model.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from einops import rearrange
+
+class AttentionFFN(nn.Module):
+    def __init__(self, dim, hidden_dim,):
+        super().__init__()
+        self.linear1 = nn.Linear(dim, hidden_dim*2)
+        self.gelu = nn.GELU()
+        self.linear2 = nn.Linear(hidden_dim, dim)
+
+    def forward(self, x):
+        # x: (B, seq_len, dim)
+        #GeGLU
+        data, gate = self.linear1(x).chunk(2, dim=-1) # (B, seq_len, hidden_dim) for data and gate
+        x = data * self.gelu(gate) # (B, seq_len, hidden_dim)
+
+        x = self.linear2(x) # (B, seq_len, dim)
+        return x
+class SelfAttention(nn.Module):
+    def __init__(self, dim, heads=4):
+        super().__init__()
+        self.dim = dim
+        self.heads = heads
+        self.net = nn.MultiheadAttention(embed_dim=dim, num_heads=heads, batch_first=True)
+
+    def forward(self, x):
+        return self.net(x, x, x, need_weights=False)[0]
+
+class CrossAttention(nn.Module):
+    def __init__(self, dim, context_dim=128, heads=4):
+        super().__init__()
+        self.dim = dim
+        self.context_dim = context_dim
+        self.heads = heads
+        self.net = nn.MultiheadAttention(embed_dim=dim, num_heads=heads, kdim=context_dim, vdim=context_dim, batch_first=True)
+
+    def forward(self, x, context):
+        return self.net(x, context, context, need_weights=False)[0]
+
+class AttentionBlock(nn.Module):
+    def __init__(self, dim, context_dim, mlp_dim, heads=4):
+        super().__init__()
+        self.dim = dim
+        self.context_dim = context_dim
+        self.mlp_dim = mlp_dim
+        self.heads = heads  
+
+        self.conv1 = nn.Conv2d(dim, dim, stride=1, kernel_size=1, padding=0)
+        self.conv2 = nn.Conv2d(dim, dim, stride=1, kernel_size=1, padding=0)
+
+        self.layernorm1 = nn.LayerNorm(dim)
+        self.layernorm2 = nn.LayerNorm(dim)
+        self.layernorm3 = nn.LayerNorm(dim)
+        self.groupnorm = nn.GroupNorm(32, dim)
+
+        self.self_attn = SelfAttention(dim, heads)
+        self.cross_attn = CrossAttention(dim, context_dim, heads)
+        self.ffn = AttentionFFN(dim, mlp_dim)
+    
+    def forward(self, x, context):
+        # Process input: B, C, H, W -> B, C, H, W 
+        skip_x = x #long skip connection
+        x = self.groupnorm(x)
+        x = self.conv1(x) # shuffles features before heads
+        B, C, H, W = x.shape
+        
+        # Self Attention Block B, C, H, W -> B, (H*W), C = B, Num_tokens, Embedding_dim -> B, Num_tokens, C
+        x = rearrange(x, 'b c h w -> b (h w) c')
+        attn_skip = x #short skip connection
+        x = self.layernorm1(x)
+        x = self.self_attn(x)
+        x = x + attn_skip
+
+        # Cross Attention Block B, Num_tokens, C -> B, Num_tokens, C
+        cross_skip = x #short skip connection
+        x = self.layernorm2(x)
+        x = self.cross_attn(x, context)
+        x = x + cross_skip
+
+        # GeGLU Block B, Num_tokens, C -> B, Num_tokens, C -> B, C, H, W
+        x = self.layernorm3(x)
+        x = self.ffn(x)
+        x = rearrange(x, 'b (h w) c -> b c h w', h=H, w=W)
+        x = self.conv2(x)
+        x = x + skip_x
+
+        return x
+
 
 
 class ResidualConvBlock(nn.Module):

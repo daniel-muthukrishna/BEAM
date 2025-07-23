@@ -34,7 +34,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_model(model_path, config, device):
+def load_model(model_path, config, device, train_loader):
     """
     Load a trained diffusion model.
     
@@ -47,9 +47,10 @@ def load_model(model_path, config, device):
         Loaded DDPM model
     """
     # Create model architecture
+    batch = next(iter(train_loader))
     unet = ContextUnet(
         in_channels=1, 
-        in_dim=12,  # Fixed dimension for orbital parameters
+        in_dim=batch['x'].shape[2],
         n_feat=config['model_n_feat']
     )
     
@@ -159,8 +160,7 @@ def main():
     print(f"Using device: {device}")
     
     # Load model
-    model = load_model(config['generation_model_path'], config, device)
-    model.eval()
+ 
 
     
     # Load parameters
@@ -171,16 +171,28 @@ def main():
     angle_path = config['data_angle_path']
     ccd_folder = config['data_ccd_folder']
     image_shape = tuple(config['generation_image_shape'])
-    full_dataset = TESSDataset(angle_path, ccd_folder, image_shape, patch_size=config['data_patch_size'], repeat_factor=config['data_repeat_factor'])
+    background_path = config['data_background_path']
+    full_dataset = TESSDataset(angle_path=angle_path, 
+                               ccd_folder=ccd_folder, 
+                               image_shape=image_shape, 
+                               background_path=background_path, 
+                               patch_size=config['data_patch_size'], 
+                               repeat_factor=config['data_repeat_factor']
+                               )
     train_dataset, valid_dataset = create_train_valid_datasets_by_orbit(full_dataset)
     train_loader = DataLoader(train_dataset, batch_size=config['generation_n_datapoint'], shuffle=True)
     valid_loader = DataLoader(valid_dataset, batch_size=config['generation_n_datapoint'], shuffle=True)
+  
+
+    model = load_model(config['generation_model_path'], config, device, train_loader)
+    model.eval()
+    # Generate and plot for training set
     train_batch = next(iter(train_loader))
     valid_batch = next(iter(valid_loader))
+
     # Generate samples for training set
     params_train = train_batch['x'].to(device)
     x_real_train = train_batch['y'].to(device)
-    # Generate and plot for training set
     print("Generating training set")
     for i in range(x_real_train.shape[0]):
         param = params_train[i].unsqueeze(0)  # [1, 12]

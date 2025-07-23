@@ -52,6 +52,7 @@ class SMTrainer:
         if self.world_size > 1 and self.device.type != "cuda":
             raise RuntimeError("Distributed training with multiple GPUs requires CUDA devices. Please run on a machine with GPUs and CUDA available.")
         
+        
         # Initialize callbacks
         self.callbacks = callbacks or []
         
@@ -60,14 +61,17 @@ class SMTrainer:
         
         # Create model
         self.model = self._create_model() 
-        # self.model = self._create_sde()
+         # self.model = self._create_sde()
 
-        # Create EMA copy of model
-        
+        # Choose best convolution algorithm
+        torch.backends.cudnn.benchmark = True
+       
+        # Create EMA copy of model weights
         self.ema = self._create_ema(beta = config['ema_beta'], update_after_step = config['ema_update_after_step'])
         
         if config['training_mixed_precision']:
             self.scaler = GradScaler()
+            torch.autograd.set_detect_anomaly(True)
         else:
             self.scaler = None
             
@@ -422,10 +426,10 @@ class SMTrainer:
             self.train_loader.sampler.set_epoch(self.current_epoch)
         
         # Apply learning rate decay
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = self.config['training_lrate'] * (
-                1 - self.current_epoch / self.config['training_n_epoch']
-            )
+        # for param_group in self.optimizer.param_groups:
+        #     param_group['lr'] = self.config['training_lrate'] * (
+        #         1 - self.current_epoch / self.config['training_n_epoch']
+        #     )
         ema_weight = self.config['ema_beta']
         # Training loop
         loss_ema_train = None
@@ -513,7 +517,6 @@ class SMTrainer:
                     loss_ema_valid = loss_valid.item()
                 else:
                     loss_ema_valid = ema_weight * loss_ema_valid + (1 - ema_weight) * loss_valid.item()
-        print(self.optimizer.param_groups[0]['lr'])
         return loss_ema_valid
     
     def validate_epoch_patch(self) -> float:

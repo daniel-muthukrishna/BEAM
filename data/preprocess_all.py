@@ -132,29 +132,25 @@ class Preprocessing:
                     dist_scaled_inverse_sqrd = lambda x: round(1 / (x / 50) ** 2, 5)
 
                     # creates dictionary of values for each ffi
-                    entry_dic = {}
-                    for i in range(1, 1024):
-                        data_dic = {}
-                        data_dic["ffi"] = ffi
-                        data_dic["orbit"] = str(orbit)
-                        data_dic["1/ED"] = dist_scaled_inverse(arr[1])
-                        data_dic["1/MD"] = dist_scaled_inverse(arr[2])
-                        data_dic["1/ED^2"] = dist_scaled_inverse_sqrd(arr[1])
-                        data_dic["1/MD^2"] = dist_scaled_inverse_sqrd(arr[2])
-                        data_dic["Eel"] = deg_to_rad(arr[3])
-                        data_dic["Eaz"] = deg_to_rad(arr[4])
-                        data_dic["Mel"] = deg_to_rad(arr[5])
-                        data_dic["Maz"] = deg_to_rad(arr[6])
-                        data_dic["E3el"] = deg_to_rad(arr[11])
-                        data_dic["E3az"] = deg_to_rad(arr[12])
-                        data_dic["M3el"] = deg_to_rad(arr[19])
-                        data_dic["M3az"] = deg_to_rad(arr[20])
-                        data_dic["below_sunshade"] = arr[3] < -5 and arr[5] < -5
-                        data_dic["patch_position"] = arr[i]
-                        entry_dic[i] = data_dic 
+                    data_dic = {}
+                    data_dic["ffi"] = ffi
+                    data_dic["orbit"] = str(orbit)
+                    data_dic["1/ED"] = dist_scaled_inverse(arr[1])
+                    data_dic["1/MD"] = dist_scaled_inverse(arr[2])
+                    data_dic["1/ED^2"] = dist_scaled_inverse_sqrd(arr[1])
+                    data_dic["1/MD^2"] = dist_scaled_inverse_sqrd(arr[2])
+                    data_dic["Eel"] = deg_to_rad(arr[3])
+                    data_dic["Eaz"] = deg_to_rad(arr[4])
+                    data_dic["Mel"] = deg_to_rad(arr[5])
+                    data_dic["Maz"] = deg_to_rad(arr[6])
+                    data_dic["E3el"] = deg_to_rad(arr[11])
+                    data_dic["E3az"] = deg_to_rad(arr[12])
+                    data_dic["M3el"] = deg_to_rad(arr[19])
+                    data_dic["M3az"] = deg_to_rad(arr[20])
+                    data_dic["below_sunshade"] = arr[3] < -5.0 and arr[5] < -5.0
 
                     # saves dictionary of dictionaries to the class
-                    self.data_dic[ffi] = entry_dic
+                    self.data_dic[ffi] = data_dic
         print(f"Dataset size: {len(self.data_dic)}")
 
         # saves dictionary to computer
@@ -233,8 +229,9 @@ class Preprocessing:
             print(f"No images below sunshade in orbit {orbit}")
             return
         # Sequentially process background images in this orbit
+        print(f'Number of images below sunshade in orbit {orbit}: {len(args)}')
         orbit_images_below_sunshade = [Preprocessing.background_image_worker(arg) for arg in args]
-        orbit_images_below_sunshade = np.array(orbit_images_below_sunshade)
+        orbit_images_below_sunshade = np.array([k for k in orbit_images_below_sunshade if k is not None])
         if len(orbit_images_below_sunshade) == 0:
             print(f"No images below sunshade in orbit {orbit}")
             return
@@ -276,18 +273,21 @@ class Preprocessing:
             arr = self.get_arr(fits_filename, folder_path)
             arr = np.delete(arr, rows_to_delete, axis=0)
             arr = np.delete(arr, columns_to_delete, axis=1)
+            downsampled_arr = arr.astype(np.float32)
             # Downsample with median
-            block = 4096 // self.image_size
-            downsampled_arr = np.zeros((self.image_size, self.image_size))
-            for x in range(self.image_size):
-                for y in range(self.image_size):
-                    downsampled_arr[x][y] = np.median(
-                        arr[block * x : block * (x + 1), block * y : block * (y + 1)]
-                    )
+            # block = 4096 // self.image_size
+            # downsampled_arr = np.zeros((self.image_size, self.image_size))
+            # for x in range(self.image_size):
+            #     for y in range(self.image_size):
+            #         downsampled_arr[x][y] = np.median(
+            #             arr[block * x : block * (x + 1), block * y : block * (y + 1)]
+            #         )
             
-            downsampled_arr_V = block_reduce(arr, block_size=(4096 // self.image_size, 4096 // self.image_size), func=np.median)
+            # downsampled_arr_V = block_reduce(arr, block_size=(4096 // self.image_size, 4096 // self.image_size), func=np.median)
             
             return downsampled_arr
+        else:
+            print(f'{fits_filename} is not a fits file')
 
 
     # IMAGE PROCESSING
@@ -471,13 +471,12 @@ class Preprocessing:
 
 
     def run(self, process_angles=True, process_images=True, make_background=True):
-        # if process_angles:
-        #     self.process_angles()
-        # if make_background:
-        #     self.create_backgrounds_by_orbit()
-        # if process_images:
-        #     self.images_processing_by_orbit()
-        self.save_patches()
+        if process_angles:
+            self.process_angles()
+        if make_background:
+            self.create_backgrounds_by_orbit()
+        if process_images:
+            self.images_processing_by_orbit()
     
 
 

@@ -44,10 +44,11 @@ class ScoreMatch(nn.Module):
         #flow matching obj
         elif self.architecture == "flow":
             flow_pred = self.nn_model(x_t, c, t, context_mask)
-            flow_ref, beta_t = self.probability_path.conditional_vector_field(x_t, x, t)
-            # flow_ref = x - eps
+            # flow_ref, beta_t = self.probability_path.conditional_vector_field(x_t, x, t)
+            flow_ref = x - eps
             flow_ref = flow_ref.detach()
-            batch_losses = torch.sum(torch.square(flow_pred - flow_ref), dim=(1,2,3))*beta_t
+            # batch_losses = torch.sum(torch.square(flow_pred - flow_ref), dim=(1,2,3))
+            batch_losses = nn.MSELoss()(flow_pred, flow_ref)
             
         else:
             raise ValueError(f"Architecture {self.architecture} must be either 'score' or 'flow'")

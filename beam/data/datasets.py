@@ -12,6 +12,7 @@ import multiprocessing
 from typing import Dict, Tuple, Optional, Union, List
 
 import numpy as np
+import math
 import torch
 from torch.utils.data import Dataset, Subset
 import torchvision.transforms as transforms
@@ -43,12 +44,24 @@ class TESSDataset(Dataset):
         self.length = 0
         self.patch_size = patch_size
         self.repeat_factor = repeat_factor
+
+     
         if self.patch_size is not None:
             assert self.image_shape[0] % self.patch_size[0] == 0, "Image shape must be divisible by patch size"
+
+            self.ph, self.pw = self.patch_size
+            self.patch_x = self.image_shape[0]//self.pw
+            self.patch_y = self.image_shape[1]//self.ph
+            self.num_patches = self.patch_x * self.patch_y #assume square images and patches so y = x
+            self.embed_dim = 12
+            self.row_embeds = embed_patch(torch.arange(self.patch_x), self.embed_dim)
+            self.col_embeds = embed_patch(torch.arange(self.patch_y), self.embed_dim)
       
+        
+    
         # Load orbital parameter dictionary
         self.angles_dic = pickle.load(open(self.angle_path, "rb"))
-        self.background_dic = {int(path[1:-19]): path for path in os.listdir(self.background_path)}
+        self.background_dic = {int(path[1:-19]): path for path in os.listdir(self.background_path) if path.endswith('.npy')}
         
         # Find all valid image files that have corresponding angle data
         # store files for use in __getitem__
@@ -88,7 +101,6 @@ class TESSDataset(Dataset):
                 - ffi_num: FFI identification number
                 - orbit: Orbit number
         """
-        start_time = time.time()
         file_path = os.path.join(self.ccd_folder, self.files[idx])
         ffi_num = self.ffi_nums[idx]
         
@@ -97,7 +109,7 @@ class TESSDataset(Dataset):
         # image_arr = pickle.load(open(file_path, "rb"))
         angles = self.angles_dic[ffi_num]
         orbit = angles['orbit']
-        background_path = self.background_dic[int(orbit)]
+        background_path = os.path.join(self.background_path, self.background_dic[int(orbit)])
         # Prepare orbital parameters (12 values)
         params = np.array([
             angles['1/ED'], angles['1/MD'], 
@@ -135,21 +147,18 @@ class TESSDataset(Dataset):
             params = params.astype(np.float32, copy=False)
             angles_image = torch.from_numpy(params).unsqueeze(0)
             # Return one random patch:
-            ph, pw = self.patch_size
-            patch_x = self.image_shape[0]//pw
-            patch_y = self.image_shape[1]//ph
-            num_patches = patch_x * patch_y #assume square images and patches so y = x
-            # patch_idx = torch.randint(num_patches, (1,))
-            patch_idx = torch.tensor(0)
-            conditioning_loc = (patch_idx + 1).unsqueeze(0) #Leave 0 for null conditioning vector
-            patch_row, patch_col = divmod(patch_idx.item(), patch_x)
-            top, left = patch_row*ph, patch_col*pw
-            ffi_image = image_arr[top:top+ph, left:left+pw]
-            background_image = background_arr[top:top+ph, left:left+pw].flatten()
-            print(background_image.shape)   
+            patch_idx = torch.randint(self.num_patches, (1,))
+            # patch_idx = torch.tensor(0)
+            
+            patch_row, patch_col = divmod(patch_idx.item(), self.patch_x)
+            conditioning_loc = torch.cat([self.row_embeds[patch_row], self.col_embeds[patch_col]], dim=-1).unsqueeze(0)
+            top, left = patch_row*self.ph, patch_col*self.pw
+            ffi_image = image_arr[top:top+self.ph, left:left+self.pw]
+            angles_image = torch.cat([angles_image, conditioning_loc], dim=1)
+            background_image = background_arr[top:top+self.ph, left:left+self.pw].flatten().astype(np.float32, copy=False)
+            background_image = torch.from_numpy(1/633118 * background_image).unsqueeze(0)
             ffi_image = torch.from_numpy(ffi_image).unsqueeze(0)
-            # angles_image = torch.cat([angles_image, conditioning_loc/num_patches], dim = 1)
-
+            angles_image = torch.cat([angles_image, background_image], dim=1)
             # #Compute all patches
             # ffi_image = torch.from_numpy(image_arr).unsqueeze(0)
             # num_patches = (self.image_shape[0]//self.patch_size[0])**2 #assume square images and patches
@@ -192,6 +201,30 @@ class TESSDataset(Dataset):
             "ffi_num": ffi_num,      # FFI identification number
             "orbit": orbit, # Orbit number
             }
+
+def embed_patch(prow, embed_dim):
+    """
+    Embed a patch location into a vector of dimension embed_dim. (1 row and col embedding)
+    Args:
+        prow: 1d tensor of patch row indices
+        embed_dim: Dimension of the embedding
+    Returns:
+        Embedding of the patch location with dimension embed_dim. 
+    """
+
+    half = embed_dim // 2
+    freqs = torch.exp(
+        -math.log(10000.0) * torch.arange(half, dtype=torch.float32) / half
+    )  
+    prow = prow.unsqueeze(1) # [N, 1]
+    row_scaled = prow * freqs[None] # [N, half]
+
+    return torch.cat([
+        torch.sin(row_scaled),
+        torch.cos(row_scaled),
+    ], dim=-1)
+
+
 
 #CURRENTLY NOT USED
 # def create_train_valid_datasets(

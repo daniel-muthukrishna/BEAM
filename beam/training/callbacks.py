@@ -149,7 +149,6 @@ class ModelCheckpoint(Callback):
     def on_epoch_end(self, trainer: Any, epoch: int, logs: Dict) -> None:
         """Save checkpoint at the end of the epoch if conditions are met."""
         self.epochs_since_last_save += 1
-        print(self.epochs_since_last_save)
         if self.epochs_since_last_save >= self.period:
             self.epochs_since_last_save = 0
             
