@@ -19,11 +19,12 @@ class ScoreMatch(nn.Module):
         self.device = device
         self.epsilon = epsilon
         self.architecture = architecture
+        self.ema = EMA(self.nn_model)
     def forward(self, x: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
         B = x.shape[0]
         t = torch.rand(B, 1, 1, 1, device=self.device) * (1. - self.epsilon) + self.epsilon #(BATCH_SIZE, 1, 1, 1)
         x_t,eps = self.probability_path.sample_conditional(x, t)
-        
+        # print(f'BATCH SIZE: {B}')
 
         context_mask = torch.bernoulli(torch.zeros_like(c) + self.drop_prob)
 
@@ -98,11 +99,12 @@ class ScoreMatch(nn.Module):
             ode =  sde.probability_flow()
             simulator = simulator(ode, t, num_save=num_save)
         elif self.architecture == "noise":
-            t0 = torch.linspace(epsilon, 1.0 - epsilon, num_steps, device=device)
+            t0 = torch.linspace(epsilon**2, 1.0, num_steps, device=device)
             t = t0.unsqueeze(0).expand(1, num_steps) #(1, num_steps)
             score_model = noise2score(self.nn_model, self.probability_path)
-            sde = SDE(drift_model=score2flow(score_model, self.probability_path), score_model=score_model, sigma=VPBeta(), guidance_value=guidance_scale)
-            simulator = simulator(sde, t)
+            sde = SDE(drift_model=score2flow(score_model, self.probability_path), score_model=score_model, sigma=self.probability_path.beta, guidance_value=guidance_scale)
+            ode = sde.probability_flow()
+            simulator = simulator(ode, t, num_save=num_save)
         else:
             raise ValueError(f"Architecture {self.architecture} must be either 'score' or 'flow' or 'noise'")
         
@@ -129,6 +131,7 @@ class EMA:
         self.beta   = beta
         self.step   = 0
         self.warmup = update_after_step
+        self.backup = None
 
         self.shadow = [p.detach().clone() for p in model.parameters()]
 
@@ -149,6 +152,16 @@ class EMA:
         """Load EMA weights into `model` (for evaluation / sampling)."""
         for s, p in zip(self.shadow, model.parameters()):
             p.data.copy_(s)
+
+    @torch.no_grad()
+    def store(self, model):
+        self.backup = [p.detach().clone() for p in model.parameters()]
+
+    @torch.no_grad()
+    def restore(self, model):
+        for p, b in zip(model.parameters(), self.backup):
+            p.data.copy_(b)
+        self.backup = None
 
     # convenience helpers for checkpointing
     def state_dict(self):

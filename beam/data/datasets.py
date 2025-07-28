@@ -53,7 +53,7 @@ class TESSDataset(Dataset):
             self.patch_x = self.image_shape[0]//self.pw
             self.patch_y = self.image_shape[1]//self.ph
             self.num_patches = self.patch_x * self.patch_y #assume square images and patches so y = x
-            self.embed_dim = 12
+            self.embed_dim = 6
             self.row_embeds = embed_patch(torch.arange(self.patch_x), self.embed_dim)
             self.col_embeds = embed_patch(torch.arange(self.patch_y), self.embed_dim)
       
@@ -62,6 +62,9 @@ class TESSDataset(Dataset):
         # Load orbital parameter dictionary
         self.angles_dic = pickle.load(open(self.angle_path, "rb"))
         self.background_dic = {int(path[1:-19]): path for path in os.listdir(self.background_path) if path.endswith('.npy')}
+
+        self.MEAN = 0.1154092
+        self.STD =  0.2346011
         
         # Find all valid image files that have corresponding angle data
         # store files for use in __getitem__
@@ -82,6 +85,21 @@ class TESSDataset(Dataset):
         
         end_time = time.time()
         print(f"Dataset built with {self.length} samples in {end_time - start_time:.2f} seconds")
+
+    def _get_cache(self):
+        if self._cache is None:
+            # one cache per worker process
+            self._cache = {}
+        return self._cache
+
+    def _mmap(self, path):
+        cache = self._get_cache()
+        arr = cache.get(path)
+        if arr is None:
+            # load once per worker, keep the memmap open
+            arr = np.load(path, mmap_mode='r')
+            cache[path] = arr
+        return arr
 
     def __len__(self) -> int:
         """Return the number of samples in the dataset."""
@@ -155,10 +173,10 @@ class TESSDataset(Dataset):
             top, left = patch_row*self.ph, patch_col*self.pw
             ffi_image = image_arr[top:top+self.ph, left:left+self.pw]
             angles_image = torch.cat([angles_image, conditioning_loc], dim=1)
-            background_image = background_arr[top:top+self.ph, left:left+self.pw].flatten().astype(np.float32, copy=False)
+            background_image = background_arr[top:top+self.ph, left:left+self.pw].astype(np.float32, copy=False)
             background_image = torch.from_numpy(1/633118 * background_image).unsqueeze(0)
-            ffi_image = torch.from_numpy(ffi_image).unsqueeze(0)
-            angles_image = torch.cat([angles_image, background_image], dim=1)
+            ffi_image = torch.from_numpy(ffi_image).unsqueeze(0) - background_image
+            ffi_image = (ffi_image-self.MEAN)/self.STD
             # #Compute all patches
             # ffi_image = torch.from_numpy(image_arr).unsqueeze(0)
             # num_patches = (self.image_shape[0]//self.patch_size[0])**2 #assume square images and patches
@@ -192,8 +210,6 @@ class TESSDataset(Dataset):
             # Apply transformations
             angles_image = transform(angles_image)
             ffi_image = target_transform(ffi_image)
-
-
 
         return {
             "x": angles_image,       # Orbital parameters (1×12 vector)
@@ -340,3 +356,6 @@ class TESS_4096_processed_images(Dataset):
     def __getitem__(self, ffi_num: str) -> torch.Tensor:
         with open(self.ffi_to_pkl_filepath[ffi_num], 'rb') as file:
             return pickle.load(file)
+
+
+

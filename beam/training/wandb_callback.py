@@ -145,7 +145,8 @@ class WeightsAndBiasesCallback(Callback):
                     n_datapoint=2,
                     image_shape=trainer.config['data_image_shape'] if trainer.config['data_patch_size'] is None else trainer.config.get('data_patch_size'),
                     step=self.current_step,
-                    name="Training Set"
+                    name="Training Set",
+                    ema=trainer.ema
                 )
                 
                 # Log validation samples
@@ -157,7 +158,8 @@ class WeightsAndBiasesCallback(Callback):
                     n_datapoint=1,
                     image_shape=trainer.config['data_image_shape'] if trainer.config['data_patch_size'] is None else trainer.config.get('data_patch_size'),
                     step=self.current_step,
-                    name="Validation Set"
+                    name="Validation Set",
+                    ema=trainer.ema
                 )
             except Exception as e:
                 print(f"Warning: Failed to log sample images to W&B: {e}")

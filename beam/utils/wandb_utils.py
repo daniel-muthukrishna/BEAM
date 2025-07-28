@@ -18,7 +18,7 @@ import io
 import wandb
 
 
-from beam.models.interpolant import ScoreMatch
+from beam.models.interpolant import ScoreMatch, EMA
 
 def init_wandb(config: Dict[str, Any], project_name: str = "beam-tess", mode: str = "online") -> None:
     """
@@ -132,7 +132,8 @@ def log_sample_images(
     n_datapoint: int = 1,
     image_shape: Tuple[int, int] = (64, 64),
     step: int = None,
-    name: str = "Training Set"  # "Training" or "Validation"
+    name: str = "Training Set",  # "Training" or "Validation"
+    ema: Optional[EMA] = None
 ) -> None:
     """
     Generate samples and log them to W&B with original and generated images side by side.
@@ -147,6 +148,11 @@ def log_sample_images(
         step: Optional step number (e.g., epoch)
         name: Name for the log (e.g., "Training Set", "Validation Set")
     """
+    MEAN = 0.1154092
+    STD =  0.2346011
+    if ema is not None:
+        ema.store(model)
+        ema.copy_to(model)
 
     # Get a batch of data
     data_batch = next(iter(dataloader))
@@ -175,13 +181,13 @@ def log_sample_images(
         
         # Add original image
         plt.subplot(1, n_sample+1, 1)
-        plt.imshow(x_real[i][0].cpu().detach().numpy(), cmap='viridis', vmin=0, vmax=1)
+        plt.imshow((x_real[i][0].cpu().detach().numpy()*STD + MEAN), cmap='viridis', vmin=0, vmax=1)
         plt.title(f"Original\nOrbit {orbits[i]}, FFI {ffi_nums[i]}")
         plt.axis('off')
         # Add generated samples
         for j in range(n_sample):
             plt.subplot(1, n_sample+1, j+2)
-            plt.imshow(x_gen[i*n_sample + j][0].cpu().detach().numpy(), cmap='viridis', vmin=0, vmax=1)
+            plt.imshow((x_gen[i*n_sample + j][0].cpu().detach().numpy()*STD + MEAN), cmap='viridis', vmin=0, vmax=1)
             plt.title(f"Sample {j+1}")
             plt.axis('off')
         plt.tight_layout()
@@ -208,7 +214,7 @@ def log_sample_images(
     fig = plt.figure(figsize=(16, 3))
     for idx, (ts, sample) in enumerate(zip(display_timesteps, display_samples)):
         plt.subplot(1, len(display_timesteps), idx+1)
-        plt.imshow(sample[0, 0], cmap='gray', vmin=0, vmax=1)
+        plt.imshow((sample[0, 0]*STD + MEAN), cmap='viridis', vmin=0, vmax=1)
         
         if idx == 0:
             plt.title(f"t={ts}\n(Pure Noise)")
@@ -227,6 +233,8 @@ def log_sample_images(
     
     # Log the generation process
     log_images(f"{name} Generation Process", [process_img], step=step, caption=["Denoising steps"])
+    if ema is not None:
+        ema.restore(model)
 
 
 def log_figure(tag: str, fig: plt.Figure, step: int = None) -> None:

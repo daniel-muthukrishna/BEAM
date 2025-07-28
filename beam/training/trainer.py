@@ -18,7 +18,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset, Subset
 from torch.utils.data.distributed import DistributedSampler
 from torchvision import datasets, utils, transforms
-from torch.amp import autocast, GradScaler
+from torch.amp import GradScaler
 from tqdm.auto import tqdm
 
 from beam.models.unet import ContextUnet
@@ -65,21 +65,20 @@ class SMTrainer:
 
         # Choose best convolution algorithm
         torch.backends.cudnn.benchmark = True
-       
         # Create EMA copy of model weights
         self.ema = self._create_ema(beta = config['ema_beta'], update_after_step = config['ema_update_after_step'])
         
-        if config['training_mixed_precision']:
-            self.scaler = GradScaler()
-            torch.autograd.set_detect_anomaly(True)
-        else:
-            self.scaler = None
+        self.use_amp = config['training_mixed_precision']
+        self.scaler = torch.GradScaler('cuda', enabled=self.use_amp)
+
+
+        self.max_steps = config['training_n_epoch'] *  len(self.train_loader)
             
         # Create optimizer
-        self.optimizer = torch.optim.Adam(
-            self.model.parameters(), 
-            lr=config['training_lrate']
-        )
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=config['optimizer_max_lr'], weight_decay=config['optimizer_weight_decay'], fused=True)
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=self.max_steps, eta_min=config['optimizer_min_lr'])
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = config['optimizer_max_lr'] if config['optimizer_warmup_steps'] == 0 else self.config['optimizer_min_lr']
         
         # Initialize training state
         self.loss_history_train = []
@@ -88,8 +87,11 @@ class SMTrainer:
         self.best_valid_loss = float('inf')
         self.epochs_without_improvement = 0
         self.current_epoch = 0
+        self.current_step = 0
         self.start_training_time = None
         self.stop_training = False  # Flag for early stopping
+
+
         
         # Create checkpoint directory
         self.save_dir = config['paths_save_dir']
@@ -131,8 +133,9 @@ class SMTrainer:
         train_loader = DataLoader(
             self.train_dataset, 
             batch_size=self.config['training_batch_size'], 
-            pin_memory=False, #False -> True
-            num_workers=0, # 0 -> 4
+            pin_memory=True, #False -> True
+            num_workers=2, # 0 -> 4
+            persistent_workers=True,
             drop_last=True, 
             sampler=train_sampler,
             shuffle=(train_sampler is None)
@@ -141,7 +144,7 @@ class SMTrainer:
         valid_loader = DataLoader(
             self.valid_dataset, 
             batch_size=self.config['training_batch_size'], 
-            pin_memory=False,
+            pin_memory=True,
             num_workers=0, 
             drop_last=True, 
             sampler=valid_sampler,
@@ -158,14 +161,20 @@ class SMTrainer:
             Initialized DDPM model
         """
         # Get conditioning dimension from dataset
-        sample = next(iter(self.train_loader))
-        in_dim = sample['x'].shape[2]  # Dimension of the conditioning vector
+        sample = self.train_dataset[0]
+        in_dim = sample['x'].shape[1]  # Dimension of the conditioning vector
         
         # Create U-Net model
         unet = ContextUnet(
-            in_channels=1, 
-            in_dim=in_dim, 
-            n_feat=self.config['model_n_feat']
+            in_feats=1, 
+            context_len=in_dim, 
+            n_feat=self.config['model_n_feat'],
+            channel_mults=self.config['model_channel_mults'],
+            heads_at=self.config['model_heads_at'],
+            time_dim = 16,
+            context_dim = 16,
+            num_res = self.config['model_num_res']
+
         )
         
         # Create score matching model
@@ -188,38 +197,7 @@ class SMTrainer:
             )
         
         return fm
-    def _create_sde(self):
-        """
-        Create and initialize diffusion model.
-        
-        Returns:
-            Initialized DDPM model
-        """
-        # Get conditioning dimension from dataset
-        sample = next(iter(self.train_loader))
-        in_dim = sample['x'].shape[2]  # Dimension of the conditioning vector
-        
-        # Create U-Net model
-        unet = ContextUnet(
-            in_channels=1, 
-            in_dim=in_dim, 
-            n_feat=self.config['model_n_feat']
-        )
-        sde = VESDE(sigma_min=0.01, sigma_max=50,
-                     device=self.device, model=unet, guidance_value=1.0)
-        # Create score matching model
-        sbd = SBD(nn_model=unet, 
-                        sde=sde, device=self.device, 
-                        drop_prob=self.config['model_drop_prob'], 
-                        epsilon=self.config['model_epsilon'], 
-                        architecture=self.config['model_architecture'])
-        sbd.to(self.device)
-        if self.world_size > 1:
-            sbd = nn.parallel.DistributedDataParallel(
-                sbd, 
-                device_ids=[self.rank]
-            )
-        return sbd
+
     def _create_ema(self, beta: float = 0.999, update_after_step: int = 0) -> EMA:
         """
         Create exponential moving average of model parameters.
@@ -268,7 +246,7 @@ class SMTrainer:
             f.write(f"Batch size\t\t\t\t\t\t{self.config['training_batch_size']}\n")
             f.write(f"Training/validation ratio\t\t{len(self.train_dataset) / (len(self.train_dataset) + len(self.valid_dataset)):.2f}\n")
             f.write(f"n_feat (CNN num of features)\t{self.config['model_n_feat']}\n")
-            f.write(f"Learning rate\t\t\t\t\t{self.config['training_lrate']}\n")
+            f.write(f"Learning rate\t\t\t\t\t{self.config['optimizer_max_lr']}\n")
             f.write(f"Image size\t\t\t\t\t\t{self.config['data_image_shape']}\n")
             f.write(f"GPUs used\t\t\t\t\t\t{self.world_size}\n")
             f.write(f"Early stopping patience\t\t{self.config['training_patience']}\n")
@@ -278,35 +256,6 @@ class SMTrainer:
         
         print(f"Model info saved to {os.path.join(self.save_dir, 'model_info.txt')}")
     
-    # Handled in callbacks.py
-    # def save_checkpoint(self, epoch: int) -> None:
-    #     """
-    #     Save a model checkpoint.
-        
-    #     Args:
-    #         epoch: Current epoch number
-    #     """
-    #     # Only save if this is the main process
-    #     if self.rank != 0:
-    #         return
-            
-    #     # Get base model (remove DistributedDataParallel wrapper if needed)
-    #     model = self.model.module if isinstance(self.model, nn.parallel.DistributedDataParallel) else self.model
-        
-    #     # Save checkpoint
-    #     checkpoint_path = os.path.join(self.save_dir, f"model_epoch{epoch}.pth")
-    #     torch.save({
-    #         'epoch': epoch,
-    #         'model_state_dict': model.state_dict(),
-    #         'optimizer_state_dict': self.optimizer.state_dict(),
-    #         'train_loss': self.loss_history_train,
-    #         'valid_loss': self.loss_history_valid,
-    #         'best_valid_loss': self.best_valid_loss,
-    #         'epochs_without_improvement': self.epochs_without_improvement,
-    #         'ema_state_dict': self.ema.state_dict(),
-    #     }, checkpoint_path)
-        
-    #     print(f'Saved checkpoint to {checkpoint_path}')
     
     def load_checkpoint(self, checkpoint_path: str) -> None:
         """
@@ -338,10 +287,15 @@ class SMTrainer:
         self.time_history = checkpoint['time_history']
         self.best_valid_loss = checkpoint['best_valid_loss']
         self.epochs_without_improvement = checkpoint['epochs_without_improvement']
-        self.time_history = [i for i in range(len(self.loss_history_train))]
         
   
-            
+    def lr_schedule(self, step: int) -> float:
+        if step <= self.config['optimizer_warmup_steps']:
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = self.config['optimizer_max_lr'] * step / self.config['optimizer_warmup_steps']
+        else:
+            self.scheduler.step()
+        
     
     def train_epoch(self) -> float:
         """
@@ -350,23 +304,27 @@ class SMTrainer:
         Returns:
             Average training loss for the epoch
         """
-        # Set to training mode
-        self.model.train()
         
         # Set epoch for distributed sampling
         if self.world_size > 1 and isinstance(self.train_loader.sampler, DistributedSampler):
             self.train_loader.sampler.set_epoch(self.current_epoch)
         
         # Apply learning rate decay
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = self.config['training_lrate'] * (
-                1 - self.current_epoch / self.config['training_n_epoch']
-            )
+        # for param_group in self.optimizer.param_groups:
+        #     param_group['lr'] = self.config['optimizer_max_lr'] * (
+        #         1 - self.current_epoch / self.config['training_n_epoch']
+        #     )
+        # if self.config['optimizer_warmup_steps'] > 0:
+        #     for param_group in self.optimizer.param_groups:
+        #         param_group['lr'] = self.config['optimizer_max_lr'] * (
+        #             1 - self.current_epoch / self.config['training_n_epoch']
+        #         )
         ema_weight = self.config['ema_beta']
         # Training loop
         loss_ema_train = None
         
         for batch_idx, data_batch in enumerate(tqdm(self.train_loader, desc=f"Training epoch {self.current_epoch}")):
+
             # Call on_batch_begin callbacks
             for callback in self.callbacks:
                 callback.on_batch_begin(self, batch_idx)
@@ -381,19 +339,21 @@ class SMTrainer:
             c_train = data_batch['x'].to(self.device, non_blocking=True)
             
             # Forward pass and loss calculation
-            if self.config['training_mixed_precision']:
-                with autocast('cuda'):
-                    loss_train = self.model(x_train, c_train)
-                self.scaler.scale(loss_train).backward()
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-
-            else:
+            with torch.autocast('cuda', enabled=self.use_amp):
                 loss_train = self.model(x_train, c_train)
-                loss_train.backward()
-                self.optimizer.step()
-                
+
+            self.scaler.scale(loss_train).backward()
+            self.scaler.unscale_(self.optimizer)
+            if self.config['optimizer_grad_clip'] > 0:
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config['optimizer_grad_clip'])
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+   
             self.ema.update(self.model)
+
+            #Update learning rate
+            self.lr_schedule(self.current_step)
+            self.current_step += 1
                 
             # Update exponential moving average of loss
             if loss_ema_train is None:
@@ -410,81 +370,6 @@ class SMTrainer:
                 callback.on_batch_end(self, batch_idx, batch_logs)
         
         return loss_ema_train
-    
-    def train_epoch_patch(self) -> float:
-        """
-        Train the model for one epoch.
-        
-        Returns:
-            Average training loss for the epoch
-        """
-            # Set to training mode
-        self.model.train()
-        
-        # Set epoch for distributed sampling
-        if self.world_size > 1 and isinstance(self.train_loader.sampler, DistributedSampler):
-            self.train_loader.sampler.set_epoch(self.current_epoch)
-        
-        # Apply learning rate decay
-        # for param_group in self.optimizer.param_groups:
-        #     param_group['lr'] = self.config['training_lrate'] * (
-        #         1 - self.current_epoch / self.config['training_n_epoch']
-        #     )
-        ema_weight = self.config['ema_beta']
-        # Training loop
-        loss_ema_train = None
-        
-        for batch_idx, data_batch in enumerate(tqdm(self.train_loader, desc=f"Training epoch {self.current_epoch}")):
-                
-            if self.config['training_mixed_precision']:
-                with autocast('cuda'):
-                    loss_train = self.model(x_chunk, c_chunk)
-                
-            # Call on_batch_begin callbacks
-            for callback in self.callbacks:
-                callback.on_batch_begin(self, batch_idx)
-                
-            # Prepare batch logs
-            batch_logs = {}
-            
-            self.optimizer.zero_grad()
-            
-            # Move data to device
-            for c_chunk, x_chunk in zip(torch.split(data_batch['x'], 28, dim=1), torch.split(data_batch['y'], 28, dim=1)):
-                c_train = c_chunk.permute(1, 0, 2).to(self.device)
-                x_train = x_chunk.permute(1, 0, 2, 3).to(self.device)
-            
-            # Forward pass and loss calculation
-                if self.config['training_mixed_precision']:
-                    with autocast('cuda'):
-                        loss_train = self.model(x_train, c_train)
-                    self.scaler.scale(loss_train).backward()
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-
-                else:
-                    loss_train = self.model(x_train, c_train)
-                    loss_train.backward()
-                    self.optimizer.step()
-                    
-                self.ema.update(self.model)
-                    
-                # Update exponential moving average of loss
-                if loss_ema_train is None:
-                    loss_ema_train = loss_train.item()
-                else:
-                    loss_ema_train = ema_weight * loss_ema_train + (1 - ema_weight) * loss_train.item()
-                
-            # Update batch logs
-            batch_logs["batch_loss"] = loss_train.item()
-            batch_logs["batch_loss_ema"] = loss_ema_train
-            
-            # Call on_batch_end callbacks
-            for callback in self.callbacks:
-                callback.on_batch_end(self, batch_idx, batch_logs)
-        
-        return loss_ema_train
-    
     
     def validate_epoch(self) -> float:
         """
@@ -506,10 +391,7 @@ class SMTrainer:
                 c_valid = data_batch['x'].to(self.device, non_blocking=True)
                 
                 # Forward pass and loss calculation
-                if self.config['training_mixed_precision']:
-                    with autocast('cuda'):
-                        loss_valid = self.model(x_valid, c_valid)
-                else:
+                with torch.autocast('cuda', enabled=self.use_amp):
                     loss_valid = self.model(x_valid, c_valid)
                 
                 # Update exponential moving average of loss
@@ -519,40 +401,6 @@ class SMTrainer:
                     loss_ema_valid = ema_weight * loss_ema_valid + (1 - ema_weight) * loss_valid.item()
         return loss_ema_valid
     
-    def validate_epoch_patch(self) -> float:
-        """
-        Validate the model on the validation dataset.
-        
-        Returns:
-            Average validation loss
-        """
-        # Set to evaluation mode
-        self.model.eval()
-        
-        # Validation loop
-        loss_ema_valid = None
-        ema_weight = self.config['ema_beta']
-        with torch.no_grad():
-            for data_batch in tqdm(self.valid_loader, desc=f"Validation epoch {self.current_epoch}"):
-                for c_chunk, x_chunk in zip(torch.split(data_batch['x'], 28, dim=1), torch.split(data_batch['y'], 28, dim=1)):
-                    # Move data to device
-                    c_valid = c_chunk.permute(1, 0, 2).to(self.device)
-                    x_valid = x_chunk.permute(1, 0, 2, 3).to(self.device)
-                
-                # Forward pass and loss calculation
-                    if self.config['training_mixed_precision']:
-                        with autocast('cuda'):
-                            loss_valid = self.model(x_valid, c_valid)
-                    else:
-                        loss_valid = self.model(x_valid, c_valid)
-                    
-                    # Update exponential moving average of loss
-                    if loss_ema_valid is None:
-                        loss_ema_valid = loss_valid.item()
-                    else:
-                        loss_ema_valid = ema_weight * loss_ema_valid + (1 - ema_weight) * loss_valid.item()
-        
-        return loss_ema_valid
     
     def run_checkpoint(self, save_model: bool) -> bool:
         """
@@ -570,34 +418,7 @@ class SMTrainer:
             
         print(f'Running checkpoint at epoch {self.current_epoch} on GPU {self.rank}')
         
-        try:
-            # Get base model (remove DistributedDataParallel wrapper if needed)
-            model = self.model.module if isinstance(self.model, nn.parallel.DistributedDataParallel) else self.model
-                        
-            # Plot training samples
-            # plot_samples(
-            #     model=model,
-            #     dataloader=self.train_loader,
-            #     device=self.device,
-            #     n_sample=3,
-            #     n_datapoint=3,
-            #     image_shape=self.config['data_image_shape'],
-            #     title=f"Training Samples (Epoch {self.current_epoch})",
-            #     save_path=os.path.join(self.save_dir, f"image_ep{self.current_epoch}_train.pdf")
-            # )
-            
-            # # Plot validation samples
-            # plot_samples(
-            #     model=model,
-            #     dataloader=self.valid_loader,
-            #     device=self.device,
-            #     n_sample=5,
-            #     n_datapoint=5,
-            #     image_shape=self.config['data_image_shape'],
-            #     title=f"Validation Samples (Epoch {self.current_epoch})",
-            #     save_path=os.path.join(self.save_dir, f"image_ep{self.current_epoch}_valid.pdf")
-            # )
-            
+        try:                  
             # Save loss plots
             plot_loss_history(
                 train_losses=self.loss_history_train,
@@ -609,10 +430,6 @@ class SMTrainer:
             # Save loss history to text file
             self._save_loss_history()
             
-            # Save model
-            # Handled in callbacks.py
-            # if save_model:
-            #     self.save_checkpoint(self.current_epoch)
             
             # Check for early stopping
             early_stop = (self.epochs_without_improvement >= self.config['training_patience'] and 
@@ -672,15 +489,16 @@ class SMTrainer:
             
             model = self.model.module if hasattr(self.model, 'module') else self.model
                 
-                # Log training samples
+            # Log training samples
             log_sample_images(
                 model=model,
                 dataloader=self.train_loader,
                 device=self.device,
-                n_sample=3,
-                n_datapoint=2,
+                n_sample=1,
+                n_datapoint=1,
                 image_shape=self.config['data_image_shape'] if self.config['data_patch_size'] is None else self.config.get('data_patch_size'),
-                name="Training Set"
+                name="Training Set",
+                ema=self.ema
             )
             
             # Log validation samples
@@ -688,10 +506,11 @@ class SMTrainer:
                 model=model,
                 dataloader=self.valid_loader,
                 device=self.device,
-                n_sample=3,
+                n_sample=1,
                 n_datapoint=1,
                 image_shape=self.config['data_image_shape'] if self.config['data_patch_size'] is None else self.config.get('data_patch_size'),
-                name="Validation Set"
+                name="Validation Set",
+                ema=self.ema
             )
 
         # Training loop

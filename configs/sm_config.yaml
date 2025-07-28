@@ -2,30 +2,40 @@
 
 # Model parameters
 model:
-  n_feat: 256            # Number of features in U-Net
+  n_feat: 16            # Number of features in U-Net
   epsilon: 0.0001          # Bound t for stability
   drop_prob: 0.1         # Dropout probability for classifier-free guidance
   architecture: "flow"   # Architecture to use for the model
+  channel_mults: [1, 2, 4, 8, 16, 32, 32, 32] # Channel multipliers for the U-Net: layer i has n_feat*channel_mults[i] features
+  heads_at: [6, 7] # Use attention at these indices in above channel_mults
+  num_res: [2, 2, 2, 2, 2, 2, 1, 1] # Number of residual blocks in each layer
+
 # Data parameters  
 data:
   angle_path: "/pdo/users/djtufto/data/data_tess_4096_raw/angles/tess_angles_O11-54_data_dic.pkl"  # Path to angle data
   ccd_folder: "/pdo/users/djtufto/data/data_tess_4096_med_npy/"  # Folder containing processed images
   background_path: "/pdo/users/djtufto/data/data_tess_4096_raw/backgrounds/"
   image_shape: [4096,4096]  # Shape of the images
-  patch_size: [128,128] # Shape of the patches; null for no patches
-  repeat_factor: 13 # Iterate repeat_factor times over the dataset each epoch
+  patch_size: [1024, 1024] # Shape of the patches; null for no patches
+  repeat_factor: 1 # Iterate repeat_factor times over the dataset each epoch
 
 ema:
   beta: 0.9999
   update_after_step: 10000
-  
+
+optimizer:
+  max_lr: 0.0001
+  min_lr: 0.000001
+  weight_decay: 0.0
+  warmup_steps: 1000 #0 for no warmup
+  grad_clip: 1.0 # Gradient clipping
+
 # Training parameters
 training:
-  n_epoch: 2000          # Maximum number of epochs
-  batch_size: 27         # Batch size
-  lrate: 0.0002          # Learning rate
+  n_epoch: 1000          # Maximum number of epochs
+  batch_size: 4         # Batch size
   patience: 5000          # Early stopping patience
-  mixed_precision: False # Use FP16 for training
+  mixed_precision: True # Use FP16 for training
 
 # Checkpoint parameters
 checkpoint:
@@ -51,4 +61,4 @@ paths:
   
 # Distributed training
 distributed:
-  world_size: null       # Number of GPUs (null = auto-detect)
+  world_size: 8       # Number of GPUs (null = auto-detect)

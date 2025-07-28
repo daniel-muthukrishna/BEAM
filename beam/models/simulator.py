@@ -26,7 +26,8 @@ def noise2score(noise_model: ContextUnet, path: GaussianProbabilityPath) -> Call
     Given a score model trained to output noise, return the score
     """
     def score(x: torch.Tensor, c: Optional[torch.Tensor], t: torch.Tensor, context_mask: torch.Tensor):
-        return -noise_model(x, c, t, context_mask)/path.beta(t)
+        b_t = path.beta(t).clamp_min(1e-5)
+        return -noise_model(x, c, t, context_mask)/b_t
     return score
 
 def flow2score(flow_model: ContextUnet, path: GaussianProbabilityPath) -> Callable:
