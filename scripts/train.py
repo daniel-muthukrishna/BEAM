@@ -60,7 +60,7 @@ def prepare_dataset(config):
     # Create training and validation splits based on orbit number (fast, metadata only)
     print("Creating training and validation splits by orbit...")
     train_dataset, valid_dataset = create_train_valid_datasets_by_orbit(
-        tess_dataset, orbit_threshold=47
+        tess_dataset
     )
     
     # Print dataset statistics

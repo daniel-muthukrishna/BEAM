@@ -141,8 +141,8 @@ class WeightsAndBiasesCallback(Callback):
                     model=model,
                     dataloader=trainer.train_loader,
                     device=trainer.device,
-                    n_sample=3,
-                    n_datapoint=2,
+                    n_sample=1,
+                    n_datapoint=1,
                     image_shape=trainer.config['data_image_shape'] if trainer.config['data_patch_size'] is None else trainer.config.get('data_patch_size'),
                     step=self.current_step,
                     name="Training Set",
@@ -154,7 +154,7 @@ class WeightsAndBiasesCallback(Callback):
                     model=model,
                     dataloader=trainer.valid_loader,
                     device=trainer.device,
-                    n_sample=3,
+                    n_sample=1,
                     n_datapoint=1,
                     image_shape=trainer.config['data_image_shape'] if trainer.config['data_patch_size'] is None else trainer.config.get('data_patch_size'),
                     step=self.current_step,
@@ -171,7 +171,8 @@ class WeightsAndBiasesCallback(Callback):
                 model = trainer.model.module if hasattr(trainer.model, 'module') else trainer.model
                 
                 # Log model weights
-                log_model(model, name=f"model_epoch_{epoch}")
+                log_model(model, name=f"model_epoch_{epoch}", ema=trainer.ema)
+                
             except Exception as e:
                 print(f"Warning: Failed to log model weights to W&B: {e}")
         

@@ -18,7 +18,6 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset, Subset
 from torch.utils.data.distributed import DistributedSampler
 from torchvision import datasets, utils, transforms
-from torch.amp import GradScaler
 from tqdm.auto import tqdm
 
 from beam.models.unet import ContextUnet
@@ -67,10 +66,10 @@ class SMTrainer:
         torch.backends.cudnn.benchmark = True
         # Create EMA copy of model weights
         self.ema = self._create_ema(beta = config['ema_beta'], update_after_step = config['ema_update_after_step'])
-        
+        self.mp_dtype = torch.bfloat16 
         self.use_amp = config['training_mixed_precision']
-        self.scaler = torch.GradScaler('cuda', enabled=self.use_amp)
-
+        self.scaler = torch.amp.GradScaler('cuda', enabled=(self.use_amp and self.mp_dtype == torch.float16))
+     
 
         self.max_steps = config['training_n_epoch'] *  len(self.train_loader)
             
@@ -133,8 +132,9 @@ class SMTrainer:
         train_loader = DataLoader(
             self.train_dataset, 
             batch_size=self.config['training_batch_size'], 
-            pin_memory=True, #False -> True
-            num_workers=2, # 0 -> 4
+            pin_memory=True, 
+            num_workers=4,
+            prefetch_factor=4,
             persistent_workers=True,
             drop_last=True, 
             sampler=train_sampler,
@@ -171,8 +171,8 @@ class SMTrainer:
             n_feat=self.config['model_n_feat'],
             channel_mults=self.config['model_channel_mults'],
             heads_at=self.config['model_heads_at'],
-            time_dim = 16,
-            context_dim = 16,
+            time_dim = 64, #16 for 1024
+            context_dim = 64,
             num_res = self.config['model_num_res']
 
         )
@@ -193,9 +193,10 @@ class SMTrainer:
         if self.world_size > 1:
             fm = nn.parallel.DistributedDataParallel(
                 fm, 
-                device_ids=[self.rank]
+                device_ids=[self.rank],
+                static_graph=True,
+                find_unused_parameters=False,
             )
-        
         return fm
 
     def _create_ema(self, beta: float = 0.999, update_after_step: int = 0) -> EMA:
@@ -337,9 +338,10 @@ class SMTrainer:
             # Move data to device
             x_train = data_batch['y'].to(self.device, non_blocking=True)
             c_train = data_batch['x'].to(self.device, non_blocking=True)
+
             
             # Forward pass and loss calculation
-            with torch.autocast('cuda', enabled=self.use_amp):
+            with torch.autocast('cuda', enabled=self.use_amp, dtype=self.mp_dtype):
                 loss_train = self.model(x_train, c_train)
 
             self.scaler.scale(loss_train).backward()
@@ -391,7 +393,7 @@ class SMTrainer:
                 c_valid = data_batch['x'].to(self.device, non_blocking=True)
                 
                 # Forward pass and loss calculation
-                with torch.autocast('cuda', enabled=self.use_amp):
+                with torch.autocast('cuda', enabled=self.use_amp, dtype=self.mp_dtype):
                     loss_valid = self.model(x_valid, c_valid)
                 
                 # Update exponential moving average of loss
@@ -485,34 +487,33 @@ class SMTrainer:
         for callback in self.callbacks:
             callback.on_train_begin(self)
 
-        if self.rank == 0:
+        # if self.rank == 0:
             
-            model = self.model.module if hasattr(self.model, 'module') else self.model
+        #     model = self.model.module if hasattr(self.model, 'module') else self.model
                 
-            # Log training samples
-            log_sample_images(
-                model=model,
-                dataloader=self.train_loader,
-                device=self.device,
-                n_sample=1,
-                n_datapoint=1,
-                image_shape=self.config['data_image_shape'] if self.config['data_patch_size'] is None else self.config.get('data_patch_size'),
-                name="Training Set",
-                ema=self.ema
-            )
+        #     # Log training samples
+        #     log_sample_images(
+        #         model=model,
+        #         dataloader=self.train_loader,
+        #         device=self.device,
+        #         n_sample=1,
+        #         n_datapoint=1,
+        #         image_shape=self.config['data_image_shape'] if self.config['data_patch_size'] is None else self.config.get('data_patch_size'),
+        #         name="Training Set",
+        #         ema=self.ema
+        #     )
             
-            # Log validation samples
-            log_sample_images(
-                model=model,
-                dataloader=self.valid_loader,
-                device=self.device,
-                n_sample=1,
-                n_datapoint=1,
-                image_shape=self.config['data_image_shape'] if self.config['data_patch_size'] is None else self.config.get('data_patch_size'),
-                name="Validation Set",
-                ema=self.ema
-            )
-
+        #     # Log validation samples
+        #     log_sample_images(
+        #         model=model,
+        #         dataloader=self.valid_loader,
+        #         device=self.device,
+        #         n_sample=1,
+        #         n_datapoint=1,
+        #         image_shape=self.config['data_image_shape'] if self.config['data_patch_size'] is None else self.config.get('data_patch_size'),
+        #         name="Validation Set",
+        #         ema=self.ema
+        #     )
         # Training loop
         for epoch in range(self.current_epoch, n_epoch):
             self.current_epoch = epoch

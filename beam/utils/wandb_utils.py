@@ -150,26 +150,33 @@ def log_sample_images(
     """
     MEAN = 0.1154092
     STD =  0.2346011
+    # MEAN = 0.65187982
+    # STD =  1.10163832
     if ema is not None:
         ema.store(model)
         ema.copy_to(model)
 
+
     # Get a batch of data
     data_batch = next(iter(dataloader))
     # Extract data (limited to n_datapoint)
-    x_real = data_batch['y'][:n_datapoint].to(device) if data_batch['y'].shape[1] == 1 else data_batch['y'].permute(1, 0, 2, 3)[:n_datapoint].to(device)
-    c_real = data_batch['x'][:n_datapoint].to(device) if data_batch['x'].shape[1] == 1 else data_batch['x'].permute(1, 0, 2)[:n_datapoint].to(device)
-    ffi_nums = data_batch['ffi_num'][:n_datapoint] if data_batch['x'].shape[1] == 1 else data_batch['ffi_num']*n_datapoint
-    orbits = data_batch['orbit'][:n_datapoint] if data_batch['x'].shape[1] == 1 else data_batch['orbit']*n_datapoint
+    x_real = data_batch['y'][:n_datapoint].to(device) 
+    c_real = data_batch['x'][:n_datapoint].to(device) 
+    ffi_nums = data_batch['ffi_num'][:n_datapoint] 
+    orbits = data_batch['orbit'][:n_datapoint] 
     # Generate samples
     with torch.no_grad():
         x_gen, x_gen_store, timesteps_store = model.simulate(
             c_real, 
             n_sample, 
             (image_shape[0], image_shape[1]), 
-            device
+            device,
+            num_save=8,
+            num_steps=3000,
+            guidance_scale=2.0
         )
-
+    if len(x_gen.shape) == 3:
+        x_gen = x_gen.unsqueeze(0)
     # print(f"x_gen: {x_gen.shape}, x_gen_store: {x_gen_store.shape}, timesteps_store: {timesteps_store.shape if isinstance(timesteps_store, np.ndarray) else len(timesteps_store)}")
     # Create side-by-side comparison for each datapoint
     comparison_images = []
@@ -181,13 +188,13 @@ def log_sample_images(
         
         # Add original image
         plt.subplot(1, n_sample+1, 1)
-        plt.imshow((x_real[i][0].cpu().detach().numpy()*STD + MEAN), cmap='viridis', vmin=0, vmax=1)
+        plt.imshow(x_real[i][0].cpu().detach().numpy()*STD + MEAN, cmap='viridis', vmin=0, vmax=1)
         plt.title(f"Original\nOrbit {orbits[i]}, FFI {ffi_nums[i]}")
         plt.axis('off')
         # Add generated samples
         for j in range(n_sample):
             plt.subplot(1, n_sample+1, j+2)
-            plt.imshow((x_gen[i*n_sample + j][0].cpu().detach().numpy()*STD + MEAN), cmap='viridis', vmin=0, vmax=1)
+            plt.imshow(x_gen[i*n_sample + j][0].cpu().detach().numpy()*STD + MEAN, cmap='viridis', vmin=0, vmax=1)
             plt.title(f"Sample {j+1}")
             plt.axis('off')
         plt.tight_layout()
@@ -211,20 +218,20 @@ def log_sample_images(
         display_samples = x_gen_store   
 
     # Create figure for generation process
-    fig = plt.figure(figsize=(16, 3))
-    for idx, (ts, sample) in enumerate(zip(display_timesteps, display_samples)):
-        plt.subplot(1, len(display_timesteps), idx+1)
-        plt.imshow((sample[0, 0]*STD + MEAN), cmap='viridis', vmin=0, vmax=1)
+    # fig = plt.figure(figsize=(16, 3))
+    # for idx, (ts, sample) in enumerate(zip(display_timesteps, display_samples)):
+    #     plt.subplot(1, len(display_timesteps), idx+1)
+    #     plt.imshow(sample[0, 0]*STD + MEAN, cmap='viridis', vmin=0, vmax=1)
         
-        if idx == 0:
-            plt.title(f"t={ts}\n(Pure Noise)")
-        elif idx == len(display_timesteps) - 1:
-            plt.title(f"t={ts}\n(Final Image)")
-        else:
-            plt.title(f"t={ts}")
+    #     if idx == 0:
+    #         plt.title(f"t={ts}\n(Pure Noise)")
+    #     elif idx == len(display_timesteps) - 1:
+    #         plt.title(f"t={ts}\n(Final Image)")
+    #     else:
+    #         plt.title(f"t={ts}")
             
-        plt.axis('off')
-    plt.tight_layout()
+    #     plt.axis('off')
+    # plt.tight_layout()
 
     # Convert figure to image array
     fig.canvas.draw()
@@ -250,7 +257,7 @@ def log_figure(tag: str, fig: plt.Figure, step: int = None) -> None:
     log_images(tag, image, step=step)
 
 
-def log_model(model: torch.nn.Module, name: str = "model") -> None:
+def log_model(model: torch.nn.Module, name: str = "model", ema: Optional[EMA] = None) -> None:
     """
     Log a PyTorch model to W&B.
     
@@ -260,22 +267,21 @@ def log_model(model: torch.nn.Module, name: str = "model") -> None:
     """
     # Get model state dict, handling DistributedDataParallel
     model_state = model.module.state_dict() if hasattr(model, 'module') else model.state_dict()
-    ema_state = model.ema.state_dict() if hasattr(model, 'ema') else None
+    if ema is not None:
+        model_state |= ema.state_dict()
     
     # Save model to a temporary file
     tmp_path = f"{name}.pt"
-    tmp_ema_path = f"{name}_ema.pt"
     torch.save(model_state, tmp_path)
-    torch.save(ema_state, tmp_ema_path)
     
     # Log model file
     wandb.save(tmp_path)
-    wandb.save(tmp_ema_path)
+    
     # Clean up
     if os.path.exists(tmp_path):
         os.remove(tmp_path)
-    if os.path.exists(tmp_ema_path):
-        os.remove(tmp_ema_path)
+
+
 
 def finish_run() -> None:
     """Finish the current W&B run."""

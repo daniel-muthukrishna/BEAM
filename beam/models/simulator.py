@@ -7,11 +7,11 @@ Defining ODE and SDE classes and their corresponding simulators.
 import torch
 import torch.nn as nn
 from beam.models.unet import ContextUnet
-from beam.models.probabilitypath import GaussianProbabilityPath, VPBeta
+from beam.models.probabilitypath import GaussianProbabilityPath, VPBeta, OTAlpha
 from tqdm import tqdm
 from typing import Optional, Callable
 from abc import ABC, abstractmethod
-
+import numpy as np
 from torchdiffeq import odeint
 
 # Helper functions for converting between flow and score models for gaussian paths
@@ -119,11 +119,14 @@ class SDE():
     """
     Wrapper for U-net to be used as an SDE which can be solved using SDE Solvers.
     """
-    def __init__(self, drift_model: ContextUnet, score_model: ContextUnet, guidance_value: float, sigma: float):
+    def __init__(self, drift_model: ContextUnet, score_model: ContextUnet, guidance_value: float, sigma: float, mode: str = "score"):
         self.guidance_value = guidance_value
         self.flow_model = drift_model
         self.score_model = score_model
-        self.sigma = sigma
+        self.sigma = lambda t: torch.sqrt(2/t)
+        self.mode = mode
+        self.beta = VPBeta()
+        self.alpha = OTAlpha()
     
     def drift(self,x: torch.Tensor, c: torch.Tensor, t: torch.Tensor):
         """
@@ -135,22 +138,34 @@ class SDE():
             gfc_drift: torch.Tensor
         Returns the drift of the SDE according to classifier-free guidance
         """
+        x0, t0 = x, t
         sigma = self.sigma
+        t0 = t.clamp(5e-3, 0.999)
+        beta  = self.beta(t).clamp_min(1e-12)
+
         if not isinstance(self.sigma, float):
             sigma = self.sigma(t)
         context_mask = torch.cat([torch.zeros_like(c), torch.ones_like(c)], dim=0)
+
         c = torch.cat([c, c], dim=0)
         x = torch.cat([x, x], dim=0)
         t = torch.cat([t, t], dim=0)
 
-        vf_output = self.flow_model(x, c, t, context_mask)
-        conditional_vector_field, unconditional_vector_field = vf_output.chunk(2, dim=0)
-        gfc_vector_field = (1-self.guidance_value) * unconditional_vector_field + self.guidance_value * conditional_vector_field
+        # vf_output = self.flow_model(x, c, t, context_mask)
+        # conditional_vector_field, unconditional_vector_field = vf_output.chunk(2, dim=0)
+        # gfc_vector_field = (1-self.guidance_value) * unconditional_vector_field + self.guidance_value * conditional_vector_field
 
-        score_output = self.score_model(x, c, t, context_mask)
-        conditional_score, unconditional_score = score_output.chunk(2, dim=0)
-        gfc_score = (1-self.guidance_value )* unconditional_score + self.guidance_value * conditional_score
-        return gfc_vector_field + 0.5*sigma**2 * gfc_score
+        # score_output = self.score_model(x, c, t, context_mask)
+        # conditional_score, unconditional_score = score_output.chunk(2, dim=0)
+        # gfc_score = (1-self.guidance_value )* unconditional_score + self.guidance_value * conditional_score
+        if self.mode == "noise":
+            noise_output = self.flow_model(x, c, t, context_mask)
+            conditional_noise, unconditional_noise = noise_output.chunk(2, dim=0)
+            gfc_noise = (1-self.guidance_value )* unconditional_noise + self.guidance_value * conditional_noise
+            gfc_score = -gfc_noise / beta 
+            gfc_vector_field = (gfc_score + x0)/t0
+
+        return gfc_vector_field + 0.5*(sigma**2) * gfc_score
     
     def score(self, x: torch.Tensor, c: torch.Tensor, t: torch.Tensor):
         """
@@ -172,7 +187,7 @@ class SDE():
             gfc_score = (1-self.guidance_value )* unconditional_score + self.guidance_value * conditional_score
         return gfc_score
     
-    def velocity_field(self, x: torch.Tensor, c: torch.Tensor, t: torch.Tensor):
+    def velocity_field(self, x: torch.Tensor, c: torch.Tensor, t: torch.Tensor,):
         """
         Args:
             x: torch.Tensor
@@ -183,6 +198,9 @@ class SDE():
         Return the velocity field component of the Drift
         """
         if c is not None:
+            x0 = x
+            t0 = t.clamp(5e-3, 0.999)
+            beta  = self.beta(t).clamp_min(1e-12)
             context_mask = torch.cat([torch.zeros_like(c), torch.ones_like(c)], dim=0)
             c = torch.cat([c, c], dim=0)
             x = torch.cat([x, x], dim=0)
@@ -190,6 +208,8 @@ class SDE():
             vf_output = self.flow_model(x, c, t, context_mask)  
             conditional_vector_field, unconditional_vector_field = vf_output.chunk(2, dim=0)
             gfc_vector_field = (1-self.guidance_value) * unconditional_vector_field + self.guidance_value * conditional_vector_field
+            score = -gfc_vector_field/beta
+            gfc_vector_field = (score + x0)/t0
         return gfc_vector_field
     
     def diffusion_coeff(self, x, t):

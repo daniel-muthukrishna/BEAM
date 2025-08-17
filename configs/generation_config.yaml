@@ -1,25 +1,29 @@
 model:
-  n_feat: 256            # Number of features in U-Net
-  epsilon: 0.0001          # Bound t for stability
-  architecture: "flow"   # Architecture to use for the model
+  n_feat: 16             # Number of features in U-Net
+  epsilon: 0.001          # Bound t for stability
+  architecture: "noise"   # Architecture to use for the model
+  channel_mults: [1,2,4,8,16,32,32,32]
+  heads_at: [5,6,7]
+  num_res: [2,2,2,2,2,1,1,1]
+
 
 data:
   angle_path: "/pdo/users/jlupoiii/TESS/data/angles/angles_O11-54_data_dic.pkl"  # Path to angle data
-  ccd_folder: "/pdo/users/djtufto/data/data_tess_4096_med_npy/"  # Folder containing processed images
+  ccd_folder: "/pdo/users/djtufto/data/data_tess_4096_full/"  # Folder containing processed images
   background_path: "/pdo/users/djtufto/data/data_tess_4096_raw/backgrounds"  # Folder containing background images
   image_shape: [4096, 4096]  # Shape of the images
-  patch_size: [128,128] # Shape of the patches; null for no patches
+  patch_size: [1024,1024] # Shape of the patches; null for no patches
   repeat_factor: 1 # Iterate repeat_factor times over the dataset each epoch
   
 
 # Used for sampling from generate.py
 generation:
-  model_path: "/pdo/users/djtufto/BEAM/model_outputs/sm_4096_med_sc/checkpoint_epoch_499_20250717_014814.pth" # Path to trained model checkpoint
+  model_path: "/pdo/users/djtufto/BEAM/model_outputs/flow-test/checkpoint_epoch_499_20250808_010941.pth" # Path to trained model checkpoint
   params_file: "data/params/params_100.pkl" # Path to orbital parameters (pickle file of shape [N, 12])
-  n_datapoint: 2 # Number of datapoints (sets of parameters) to sample
-  n_sample: 10 # Number of samples per datapoint
-  num_timesteps: 5 # Number of timesteps to log including endpoints
-  image_shape: [128, 128] # Shape of the images
-  output_dir: "model_outputs/sm_4096_med_sc/generation_valid/" # Directory to save generated images
+  n_datapoint: 1 # Number of datapoints (sets of parameters) to sample
+  n_sample: 1 # Number of samples per datapoint
+  num_timesteps: 10 # Number of timesteps to log including endpoints
+  image_shape: [1024,1024] # Shape of the images
+  output_dir: "model_outputs/sm_4096_full_score/generation_valid/" # Directory to save generated images
   ema: True # Use EMA weights for sampling
   guidance_scale: 2.0 # Guidance scale for sampling

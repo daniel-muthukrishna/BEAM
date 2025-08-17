@@ -18,6 +18,35 @@ from torch.utils.data import Dataset, Subset
 import torchvision.transforms as transforms
 from PIL import Image
 from astropy.io import fits
+from collections import OrderedDict
+
+class MMapCache:
+    def __init__(self, max_open: int = 128):
+        self.max_open = int(max_open)
+        self._mm = OrderedDict()
+
+    def _close(self, arr):
+        try:
+            if isinstance(arr, np.memmap) and hasattr(arr, '_mmap') and arr._mmap is not None:
+                arr._mmap.close()
+        except Exception:
+            pass  # best effort
+
+    def get(self, path: str) -> np.ndarray:
+        mm = self._mm.get(path)
+        if mm is not None:
+            self._mm.move_to_end(path)  # mark as recently used
+            return mm
+        mm = np.load(path, mmap_mode='r')  # open new handle
+        self._mm[path] = mm
+        if len(self._mm) > self.max_open:
+            old_path, old_mm = self._mm.popitem(last=False)
+            self._close(old_mm)
+            del old_mm
+        return mm
+
+    def __len__(self):
+        return len(self._mm)
 
 
 class TESSDataset(Dataset):
@@ -45,6 +74,10 @@ class TESSDataset(Dataset):
         self.patch_size = patch_size
         self.repeat_factor = repeat_factor
 
+        self.cache = MMapCache(max_open=512)
+        self.bg_cache = MMapCache(max_open=50)
+
+
      
         if self.patch_size is not None:
             assert self.image_shape[0] % self.patch_size[0] == 0, "Image shape must be divisible by patch size"
@@ -62,14 +95,25 @@ class TESSDataset(Dataset):
         # Load orbital parameter dictionary
         self.angles_dic = pickle.load(open(self.angle_path, "rb"))
         self.background_dic = {int(path[1:-19]): path for path in os.listdir(self.background_path) if path.endswith('.npy')}
-
+        # Use for med npy
         self.MEAN = 0.1154092
         self.STD =  0.2346011
+        #use for small npy
+        # self.MEAN = 0.65187982
+        # self.STD =  1.10163832
+        #full
+        # self.MEAN = 0.1099859
+        # self.STD =  0.8313040
+        self.bg_scale = torch.tensor(1.0/633118.0, dtype=torch.float32)
         
         # Find all valid image files that have corresponding angle data
         # store files for use in __getitem__
         self.files = []
         self.ffi_nums = []
+
+        self._cache = None
+        # with open("/pdo/users/djtufto/data/data_tess_4096_raw/stars.pkl", "rb") as f:
+        #     self.star_dict = pickle.load(f)
 
         # Load all files in the ccd_folder that have corresponding angle data 
         for filename in os.listdir(self.ccd_folder):
@@ -86,20 +130,12 @@ class TESSDataset(Dataset):
         end_time = time.time()
         print(f"Dataset built with {self.length} samples in {end_time - start_time:.2f} seconds")
 
-    def _get_cache(self):
-        if self._cache is None:
-            # one cache per worker process
-            self._cache = {}
-        return self._cache
-
-    def _mmap(self, path):
-        cache = self._get_cache()
-        arr = cache.get(path)
-        if arr is None:
-            # load once per worker, keep the memmap open
-            arr = np.load(path, mmap_mode='r')
-            cache[path] = arr
-        return arr
+    def _get_mmap(self, path, cache):
+        mm = cache.get(path)
+        if mm is None:
+            mm = np.load(path, mmap_mode='r')  
+            cache[path] = mm
+        return mm
 
     def __len__(self) -> int:
         """Return the number of samples in the dataset."""
@@ -138,45 +174,70 @@ class TESSDataset(Dataset):
             angles['M3el'], angles['M3az']
         ])
         
-
-        # Convert to images for consistent processing
-        # angles_image = torch.from_numpy(params).unsqueeze(0)
-
-        
-        # ffi_image = Image.fromarray(image_arr.flatten())
-        # Define transformations
-        # transform = transforms.Compose([
-        #     transforms.ToTensor(),
-        #     lambda s: s.reshape(1, angles_image.size[1])  # Reshape to 1×N tensor
-        # ])
-        # print()
-        # target_transform = transforms.Compose([
-        #     lambda s: np.array(s),
-        #     lambda s: s.reshape(self.image_shape),  # Reshape to the target image size
-        #     transforms.ToTensor(),
-        # ])
-
-        # # Apply transformations
-        # angles_image = transform(angles_image)
    
         if self.patch_size is not None:
-            background_arr = np.load(background_path, mmap_mode='r')
-            image_arr = np.load(file_path, mmap_mode='r')
-            params = params.astype(np.float32, copy=False)
-            angles_image = torch.from_numpy(params).unsqueeze(0)
-            # Return one random patch:
-            patch_idx = torch.randint(self.num_patches, (1,))
-            # patch_idx = torch.tensor(0)
+            # background_arr = np.load(background_path, mmap_mode='r')
+            # image_arr = np.load(file_path, mmap_mode='r')
+            # params = params.astype(np.float32, copy=False)
+            # angles_image = torch.from_numpy(params).unsqueeze(0)
+            # # Return one random patch:
+            # patch_idx = torch.randint(self.num_patches, (1,))
+            # # patch_idx = torch.tensor(0)
             
-            patch_row, patch_col = divmod(patch_idx.item(), self.patch_x)
-            conditioning_loc = torch.cat([self.row_embeds[patch_row], self.col_embeds[patch_col]], dim=-1).unsqueeze(0)
-            top, left = patch_row*self.ph, patch_col*self.pw
-            ffi_image = image_arr[top:top+self.ph, left:left+self.pw]
-            angles_image = torch.cat([angles_image, conditioning_loc], dim=1)
-            background_image = background_arr[top:top+self.ph, left:left+self.pw].astype(np.float32, copy=False)
-            background_image = torch.from_numpy(1/633118 * background_image).unsqueeze(0)
-            ffi_image = torch.from_numpy(ffi_image).unsqueeze(0) - background_image
-            ffi_image = (ffi_image-self.MEAN)/self.STD
+            # patch_row, patch_col = divmod(patch_idx.item(), self.patch_x)
+            # conditioning_loc = torch.cat([self.row_embeds[patch_row], self.col_embeds[patch_col]], dim=-1).unsqueeze(0)
+            # top, left = patch_row*self.ph, patch_col*self.pw
+            # ffi_image = image_arr[top:top+self.ph, left:left+self.pw]
+            # angles_image = torch.cat([angles_image, conditioning_loc], dim=1)
+            # background_image = background_arr[top:top+self.ph, left:left+self.pw].astype(np.float32, copy=False)
+            # background_image = torch.from_numpy(1/633118 * background_image).unsqueeze(0)
+            # ffi_image = torch.from_numpy(ffi_image).unsqueeze(0) - background_image
+            # ffi_image = (ffi_image-self.MEAN)/self.STD
+
+            # bg_arr  = self._get_mmap(background_path, self.bg_cache)
+            # img_arr = self._get_mmap(file_path, self.cache)
+            bg_arr = self._get_mmap(background_path, self.bg_cache)
+            img_arr = np.load(file_path, mmap_mode="r")
+            # star_dict = self.star_dict[int(orbit)]
+
+
+            # random patch index
+            patch_idx = torch.randint(self.num_patches, (1,)).item()
+            pr, pc = divmod(patch_idx, self.patch_x)
+            top, left = pr*self.ph, pc*self.pw
+            sl = np.s_[top:top+self.ph, left:left+self.pw]
+
+            # star_dict = star_dict[patch_idx]
+            # patch_x = star_dict["x"]
+            # patch_y = star_dict["y"]
+
+
+            # slices are views on the memmap; convert once to torch
+            # bg_np  = np.asarray(bg_arr[sl],  dtype=np.float32, order='C')
+            # img_np = np.asarray(img_arr[sl],  dtype=np.float32, order='C')
+            img = torch.tensor(img_arr[sl], dtype=torch.float32)         # new tensor
+            bg  = torch.tensor(bg_arr[sl], dtype=torch.float32)            # new tensor
+
+            bg.mul_(self.bg_scale)
+
+            # CHW
+            img = img.unsqueeze(0)
+            bg  = bg.unsqueeze(0)
+
+            # subtract + norm
+            img.sub_(bg)
+            img.sub_(self.MEAN).div_(self.STD)
+
+            angles = torch.from_numpy(params).to(torch.float32).unsqueeze(0)
+            cond   = torch.cat([self.row_embeds[pr], self.col_embeds[pc]], dim=-1).unsqueeze(0)
+            angles = torch.cat([angles, cond], dim=1)
+
+
+            ffi_image = img
+            angles_image = angles
+
+
+
             # #Compute all patches
             # ffi_image = torch.from_numpy(image_arr).unsqueeze(0)
             # num_patches = (self.image_shape[0]//self.patch_size[0])**2 #assume square images and patches
@@ -275,7 +336,7 @@ def embed_patch(prow, embed_dim):
 #     return train_dataset, valid_dataset
 
 
-def create_train_valid_datasets_by_orbit(dataset: TESSDataset, orbit_threshold: int = 47):
+def create_train_valid_datasets_by_orbit(dataset: TESSDataset, orbit_threshold: int = 42):
     """
     Create training and validation datasets from a TESSDataset using orbit number as the split criterion.
     Orbits <= orbit_threshold go to training, orbits > orbit_threshold go to validation.
