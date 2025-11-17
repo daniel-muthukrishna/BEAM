@@ -133,8 +133,7 @@ class SMTrainer:
             self.train_dataset, 
             batch_size=self.config['training_batch_size'], 
             pin_memory=True, 
-            num_workers=4,
-            prefetch_factor=4,
+            num_workers=2,
             persistent_workers=True,
             drop_last=True, 
             sampler=train_sampler,
@@ -145,7 +144,8 @@ class SMTrainer:
             self.valid_dataset, 
             batch_size=self.config['training_batch_size'], 
             pin_memory=True,
-            num_workers=0, 
+            num_workers=2, 
+            persistent_workers=True,
             drop_last=True, 
             sampler=valid_sampler,
             shuffle=False
@@ -487,21 +487,21 @@ class SMTrainer:
         for callback in self.callbacks:
             callback.on_train_begin(self)
 
-        # if self.rank == 0:
-            
-        #     model = self.model.module if hasattr(self.model, 'module') else self.model
+        if self.rank == 0:
+            print(f"Logging training samples on GPU {self.rank}")
+            model = self.model.module if hasattr(self.model, 'module') else self.model
                 
-        #     # Log training samples
-        #     log_sample_images(
-        #         model=model,
-        #         dataloader=self.train_loader,
-        #         device=self.device,
-        #         n_sample=1,
-        #         n_datapoint=1,
-        #         image_shape=self.config['data_image_shape'] if self.config['data_patch_size'] is None else self.config.get('data_patch_size'),
-        #         name="Training Set",
-        #         ema=self.ema
-        #     )
+            # Log training samples
+            log_sample_images(
+                model=model,
+                dataloader=self.train_loader,
+                device=self.device,
+                n_sample=1,
+                n_datapoint=1,
+                image_shape=self.config['data_image_shape'] if self.config['data_patch_size'] is None else self.config.get('data_patch_size'),
+                name="Training Set",
+                ema=self.ema
+            )
             
         #     # Log validation samples
         #     log_sample_images(

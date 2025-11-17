@@ -19,6 +19,7 @@ import torchvision.transforms as transforms
 from PIL import Image
 from astropy.io import fits
 from collections import OrderedDict
+from scipy.ndimage import binary_dilation
 
 class MMapCache:
     def __init__(self, max_open: int = 128):
@@ -96,14 +97,21 @@ class TESSDataset(Dataset):
         self.angles_dic = pickle.load(open(self.angle_path, "rb"))
         self.background_dic = {int(path[1:-19]): path for path in os.listdir(self.background_path) if path.endswith('.npy')}
         # Use for med npy
-        self.MEAN = 0.1154092
-        self.STD =  0.2346011
+        # self.MEAN = 0.1154092
+        # self.STD =  0.2346011
         #use for small npy
         # self.MEAN = 0.65187982
         # self.STD =  1.10163832
         #full
         # self.MEAN = 0.1099859
         # self.STD =  0.8313040
+        #use for backgrounds
+        # self.MEAN = 0.08837062429384838 
+        # self.STD =  0.8176902707359797
+        #256x256
+        self.MEAN = 0.01978608595999928
+        self.STD =  0.08876927679677006
+
         self.bg_scale = torch.tensor(1.0/633118.0, dtype=torch.float32)
         
         # Find all valid image files that have corresponding angle data
@@ -114,6 +122,18 @@ class TESSDataset(Dataset):
         self._cache = None
         # with open("/pdo/users/djtufto/data/data_tess_4096_raw/stars.pkl", "rb") as f:
         #     self.star_dict = pickle.load(f)
+        # for value in self.star_dict:
+        #     for patch in value:
+        #         x,y = value[patch]["x"], value[patch]["y"]
+        #         x = np.rint(x).astype(int)
+        #         y = np.rint(y).astype(int)
+        #         value[patch]["x"] = x
+        #         value[patch]["y"] = y
+        #         mask = np.zeros((self.ph, self.pw))
+        #         mask[y,x] = 1
+        #         mask = binary_dilation(mask, structure=np.ones((3,3), bool))
+        #         value[patch]["mask"] = mask
+        
 
         # Load all files in the ccd_folder that have corresponding angle data 
         for filename in os.listdir(self.ccd_folder):
@@ -163,7 +183,8 @@ class TESSDataset(Dataset):
         # image_arr = pickle.load(open(file_path, "rb"))
         angles = self.angles_dic[ffi_num]
         orbit = angles['orbit']
-        background_path = os.path.join(self.background_path, self.background_dic[int(orbit)])
+
+        # background_path = os.path.join(self.background_path, self.background_dic[int(orbit)])
         # Prepare orbital parameters (12 values)
         params = np.array([
             angles['1/ED'], angles['1/MD'], 
@@ -194,11 +215,10 @@ class TESSDataset(Dataset):
             # ffi_image = torch.from_numpy(ffi_image).unsqueeze(0) - background_image
             # ffi_image = (ffi_image-self.MEAN)/self.STD
 
-            # bg_arr  = self._get_mmap(background_path, self.bg_cache)
-            # img_arr = self._get_mmap(file_path, self.cache)
-            bg_arr = self._get_mmap(background_path, self.bg_cache)
+    
+            # bg_arr = self._get_mmap(background_path, self.bg_cache)
             img_arr = np.load(file_path, mmap_mode="r")
-            # star_dict = self.star_dict[int(orbit)]
+            # star_dict = self.star_dict[int(orbit)-10]
 
 
             # random patch index
@@ -216,23 +236,23 @@ class TESSDataset(Dataset):
             # bg_np  = np.asarray(bg_arr[sl],  dtype=np.float32, order='C')
             # img_np = np.asarray(img_arr[sl],  dtype=np.float32, order='C')
             img = torch.tensor(img_arr[sl], dtype=torch.float32)         # new tensor
-            bg  = torch.tensor(bg_arr[sl], dtype=torch.float32)            # new tensor
 
-            bg.mul_(self.bg_scale)
+            # bg  = torch.tensor(bg_arr[sl], dtype=torch.float32)            # new tensor
+            # bg.mul_(self.bg_scale)
 
             # CHW
             img = img.unsqueeze(0)
-            bg  = bg.unsqueeze(0)
+            # bg  = bg.unsqueeze(0)
 
             # subtract + norm
-            img.sub_(bg)
+            # img.sub_(bg)
             img.sub_(self.MEAN).div_(self.STD)
 
             angles = torch.from_numpy(params).to(torch.float32).unsqueeze(0)
             cond   = torch.cat([self.row_embeds[pr], self.col_embeds[pc]], dim=-1).unsqueeze(0)
             angles = torch.cat([angles, cond], dim=1)
 
-
+            # mask = torch.from_numpy(star_dict["mask"]).unsqueeze(0)
             ffi_image = img
             angles_image = angles
 
@@ -266,12 +286,12 @@ class TESSDataset(Dataset):
                 lambda s: np.array(s),
                 lambda s: s.reshape(self.image_shape),  # Reshape to the target image size
                 transforms.ToTensor(),
+                transforms.Normalize(mean=self.MEAN, std=self.STD)
             ])
 
             # Apply transformations
             angles_image = transform(angles_image)
             ffi_image = target_transform(ffi_image)
-
         return {
             "x": angles_image,       # Orbital parameters (1×12 vector)
             "y": ffi_image,          # Image (64×64 or other size)

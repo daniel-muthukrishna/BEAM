@@ -2,14 +2,12 @@
 Defining Score/Flow Matching loss and sampling structure
 Keeps copy of EMA weights for sampling
 """
-from typing import Dict, Tuple, Optional, Union, List
+from typing import Tuple, List
 import numpy as np
 import torch
 import torch.nn as nn
-from .probabilitypath import ProbabilityPath, OTAlpha, OTBeta, VPBeta
-from torchvision import datasets, transforms, utils
-from .simulator import Simulator, ODE, SDE, ODEIntegrator, score2flow, flow2score, noise2score, EulerMaruyama
-from einops import repeat
+from .probabilitypath import ProbabilityPath, VPBeta
+from .simulator import Simulator, ODE, SDE, ODEIntegrator, score2flow
 
 class ScoreMatch(nn.Module):
     def __init__(self, nn_model: nn.Module, probability_path: ProbabilityPath, device: torch.device, drop_prob: float = 0.1, epsilon: float = 1e-5, architecture: str = "flow"):
@@ -25,16 +23,14 @@ class ScoreMatch(nn.Module):
     def forward(self, x: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
         B, _, C = c.shape
         t = torch.rand(B, 1, 1, 1, device=self.device) * (1. - self.epsilon) + self.epsilon #(BATCH_SIZE, 1, 1, 1)
-        
         #Forward
-        x_t,eps = self.probability_path.sample_conditional(x, t)
+        x_t,eps, alpha_t, beta_t = self.probability_path.sample_conditional(x, t)
         # print(f'BATCH SIZE: {B}')
 
 
         drop = torch.bernoulli(torch.full((B, 1, 1), self.drop_prob, device=self.device, dtype=c.dtype))
         context_mask = drop.expand(B, 1, C)
         
-
 
         # score matching obj
         if self.architecture == "score":
@@ -44,19 +40,23 @@ class ScoreMatch(nn.Module):
             epsilon = -score_ref * beta_t #really -epsilon
             batch_losses = torch.sum(torch.square(beta_t * score_pred + epsilon), dim=(1,2,3)) #minus minus
         elif self.architecture == "noise":
-            noise_pred = self.nn_model(x_t, c, t, context_mask)
-            noise_ref = eps
-            noise_ref = noise_ref.detach()
-            # batch_losses = torch.sum(torch.square(noise_pred - noise_ref), dim=(1,2,3))
-            batch_losses = self.loss_fn(noise_pred, noise_ref)
-
+            # noise_pred = self.nn_model(x_t, c, t, context_mask)
+            # noise_ref = eps
+            # noise_ref = noise_ref.detach()
+            # # batch_losses = torch.sum(torch.square(noise_pred - noise_ref), dim=(1,2,3))
+            # batch_losses = self.loss_fn(noise_pred, noise_ref)
+            
+            #v param:
+            v_pred = self.nn_model(x_t, c, t, context_mask)
+            v_ref = alpha_t * eps - beta_t * x
+            v_ref = v_ref.detach()
+            batch_losses = self.loss_fn(v_pred, v_ref)
         #flow matching obj
         elif self.architecture == "flow":
             flow_pred = self.nn_model(x_t, c, t, context_mask) 
             # flow_ref, beta_t = self.probability_path.conditional_vector_field(x_t, x, t)
             flow_ref = x - eps 
             flow_ref = flow_ref.detach()
-            # batch_losses = torch.sum(torch.square(flow_pred - flow_ref), dim=(1,2,3))
             batch_losses = self.loss_fn(flow_pred, flow_ref)
             
         else:
@@ -71,7 +71,7 @@ class ScoreMatch(nn.Module):
         size: Tuple[int, ...], 
         device: torch.device,
         simulator: Simulator=ODEIntegrator,
-        num_steps: int=6000,
+        num_steps: int=3000,
         guidance_scale: float=1.0,
         num_save: int=1,
         epsilon: float=0.0001,
@@ -96,7 +96,6 @@ class ScoreMatch(nn.Module):
         
         x0 = torch.randn(c_i.shape[0]*n_sample, 1, *size, device=device) # random noise of shape (n_sample*n_datapoint, 1, *size) 
         if self.architecture == "flow":
-            num_steps = 1000
             ode = ODE(self.nn_model, guidance_scale)
             t0 = torch.linspace(epsilon, 1.0 - epsilon, num_steps, device=device)
             t = t0.unsqueeze(0).expand(1, num_steps) #(1, num_steps)
@@ -108,12 +107,10 @@ class ScoreMatch(nn.Module):
             ode =  sde.probability_flow()
             simulator = simulator(ode, t, num_save=num_save)
         elif self.architecture == "noise":
-            num_steps = 1500
             t0 = torch.linspace(epsilon, 1.0 - epsilon, num_steps, device=device)
             t = t0.unsqueeze(0).expand(1, num_steps) #(1, num_steps)
-            # score_model = noise2score(self.nn_model, self.probability_path)
-            sde = SDE(drift_model=self.nn_model, score_model=self.nn_model, sigma=VPBeta(), guidance_value=guidance_scale, mode="noise")
-            simulator = EulerMaruyama(sde, t, num_save=num_save)
+            sde = SDE(drift_model=self.nn_model, score_model=self.nn_model, sigma=VPBeta(), guidance_value=guidance_scale, mode="noise", probability_path=self.probability_path)
+            simulator = simulator(sde, t, num_save=num_save)
         else:
             raise ValueError(f"Architecture {self.architecture} must be either 'score' or 'flow' or 'noise'")
         

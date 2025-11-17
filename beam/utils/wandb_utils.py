@@ -148,10 +148,19 @@ def log_sample_images(
         step: Optional step number (e.g., epoch)
         name: Name for the log (e.g., "Training Set", "Validation Set")
     """
-    MEAN = 0.1154092
-    STD =  0.2346011
+    # MEAN = 0.1154092
+    # STD =  0.2346011
     # MEAN = 0.65187982
     # STD =  1.10163832
+    # MEAN = 0.08837062429384838 
+    # STD =  0.8176902707359797
+    #full
+    # MEAN = 0.1099859
+    # STD =  0.8313040
+    #256x256
+    MEAN = 0.01978608595999928
+    STD =  0.08876927679677006
+    
     if ema is not None:
         ema.store(model)
         ema.copy_to(model)
@@ -173,7 +182,7 @@ def log_sample_images(
             device,
             num_save=8,
             num_steps=3000,
-            guidance_scale=2.0
+            guidance_scale=1.2
         )
     if len(x_gen.shape) == 3:
         x_gen = x_gen.unsqueeze(0)
@@ -218,20 +227,20 @@ def log_sample_images(
         display_samples = x_gen_store   
 
     # Create figure for generation process
-    # fig = plt.figure(figsize=(16, 3))
-    # for idx, (ts, sample) in enumerate(zip(display_timesteps, display_samples)):
-    #     plt.subplot(1, len(display_timesteps), idx+1)
-    #     plt.imshow(sample[0, 0]*STD + MEAN, cmap='viridis', vmin=0, vmax=1)
+    fig = plt.figure(figsize=(16, 3))
+    for idx, (ts, sample) in enumerate(zip(display_timesteps, display_samples)):
+        plt.subplot(1, len(display_timesteps), idx+1)
+        plt.imshow(sample[0, 0]*STD + MEAN, cmap='viridis', vmin=0, vmax=1)
         
-    #     if idx == 0:
-    #         plt.title(f"t={ts}\n(Pure Noise)")
-    #     elif idx == len(display_timesteps) - 1:
-    #         plt.title(f"t={ts}\n(Final Image)")
-    #     else:
-    #         plt.title(f"t={ts}")
+        if idx == 0:
+            plt.title(f"t={ts}\n(Pure Noise)")
+        elif idx == len(display_timesteps) - 1:
+            plt.title(f"t={ts}\n(Final Image)")
+        else:
+            plt.title(f"t={ts}")
             
-    #     plt.axis('off')
-    # plt.tight_layout()
+        plt.axis('off')
+    plt.tight_layout()
 
     # Convert figure to image array
     fig.canvas.draw()
