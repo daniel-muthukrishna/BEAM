@@ -27,4 +27,4 @@ generation:
   image_shape: [4096,4096] # Shape of the images
   output_dir: "model_outputs/posterior_sde_test/generation_valid/" # Directory to save generated images
   ema: True # Use EMA weights for sampling
-  guidance_scale: 2.0 # Guidance scale for sampling
+  guidance_scale: 1.0 # Guidance scale for sampling

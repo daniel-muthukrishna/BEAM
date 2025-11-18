@@ -8,17 +8,17 @@ class TestPreprocessingOutput(unittest.TestCase):
     def setUp(self):
         # Set these paths to your reference and test output folders
         self.angle_ref_file = '/pdo/users/jlupoiii/TESS/data/angles/angles_O11-54_data_dic.pkl'
-        self.angle_test_file = '/pdo/users/djtufto/pptest1/angles/angles_data_test.pkl'
-        self.background_ref_dir = '/pdo/users/jlupoiii/TESS/data/background_avg_ccds_im64x64/'
-        self.background_test_dir = '/pdo/users/djtufto/pptest1/backgrounds/'
-        self.reference_dir = '/pdo/users/jlupoiii/TESS/data/processed_images_im64x64/'
-        self.test_output_dir = '/pdo/users/djtufto/pptest1/ccd/'
+        self.angle_test_file = '/pdo/users/djtufto/data/test_count/test_tess_angles_O11-54_data_dic.pkl'
+        self.background_ref_dir = '/pdo/users/jlupoiii/TESS/data/background_avg_ccds_im256x256/'
+        self.background_test_dir = '/pdo/users/djtufto/pptestnew/bg/'
+        self.reference_dir = '/pdo/users/jlupoiii/TESS/data/processed_images_im256x256/'
+        self.test_output_dir = '/pdo/users/djtufto/pptestnew/ccd/'
         self.config_path = 'config/preprocess_config.yaml'
         self.raw_ccd_dir = '/pdo/users/roland/SL_data/'
         self.ccd_files = 0
         self.background_files = 0
         self.tolerance = 1e-1  # Adjust as needed
-        self.orbit_range = range(11, 55)
+        self.orbit_range = range(11, 54)
         self.out_of_orbit_files = 0
         self.raw_ccd_files = 0
         self.num_mismatches = 0
@@ -46,11 +46,6 @@ class TestPreprocessingOutput(unittest.TestCase):
             with open(test_path, 'rb') as f:
                 test_img = pickle.load(f)
             self.assertEqual(ref_img.shape, test_img.shape, f"Image shape mismatch for file {ref_file}")
-            #Check if the images are the same
-            # self.assertTrue(
-            #     np.allclose(ref_img, test_img, atol=.1),
-            #     f"Image mismatch for file {ref_file}"
-            # )
             if not np.allclose(ref_img, test_img, atol=1e-3):
                 self.num_mismatches += 1
             self.ccd_files += 1

@@ -256,23 +256,6 @@ class TESSDataset(Dataset):
             ffi_image = img
             angles_image = angles
 
-
-
-            # #Compute all patches
-            # ffi_image = torch.from_numpy(image_arr).unsqueeze(0)
-            # num_patches = (self.image_shape[0]//self.patch_size[0])**2 #assume square images and patches
-            # angles_image = angles_image.expand(num_patches, -1) # N x 12
-            # locs = 1/num_patches*torch.arange(1, num_patches+ 1).unsqueeze(1) # N x 1 with values in [0, 1]
-            # angles_image = torch.cat([angles_image, locs], dim=1)
-            
-            # ph, pw = self.patch_size
-            # sh, sw = self.patch_size 
-
-            # # # Unfold the image into patches 
-            # patched_ffi = ffi_image.unfold(1, ph, sh).unfold(2,pw,sw)
-            # patch_shape = patched_ffi.shape #Need for reshaping back 
-
-            # ffi_image = patched_ffi.contiguous().view(-1, ph, pw) # 1 x num_pixels/(ph*pw) x ph x pw; 
         else:
             image_arr = pickle.load(open(file_path, "rb"))
             ffi_image = Image.fromarray(image_arr.flatten())
@@ -356,7 +339,7 @@ def embed_patch(prow, embed_dim):
 #     return train_dataset, valid_dataset
 
 
-def create_train_valid_datasets_by_orbit(dataset: TESSDataset, orbit_threshold: int = 42):
+def create_train_valid_datasets_by_orbit(dataset: TESSDataset, orbit_threshold: int = 47):
     """
     Create training and validation datasets from a TESSDataset using orbit number as the split criterion.
     Orbits <= orbit_threshold go to training, orbits > orbit_threshold go to validation.

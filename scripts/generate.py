@@ -360,8 +360,8 @@ def main_posterior_sde():
         raise ValueError(f"Image resolution {H}x{W} not divisible by low-res size {low_res_size}")
     upscale_factor = H // low_res_size
     stride = int(config.get('posterior_stride', low_res_size))
-    t=torch.linspace(config['model_epsilon'], 1 - config['model_epsilon'], 2000)
-    t = t.unsqueeze(0).expand(1, 2000).to(device)
+    t=torch.linspace(config['model_epsilon'], 1 - config['model_epsilon'], 100)
+    t = t.unsqueeze(0).expand(1, 100).to(device)
     posterior = PosteriorSDE(
         star_score=star_unet,
         light_score=light_unet,
@@ -370,7 +370,7 @@ def main_posterior_sde():
         guidance_value=config['generation_guidance_scale'],
         x_obs=x_obs,
         num_save=config['generation_num_timesteps'],
-        num_corrections=20,
+        num_corrections=3,
         corr_step_size=0.01,
         upscale_factor=upscale_factor,
         stride=stride,

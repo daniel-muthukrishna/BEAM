@@ -389,7 +389,8 @@ class PosteriorSDE():
     """
 
     def __init__(self, star_score, light_score, t: torch.Tensor, x_obs: torch.Tensor, sigma, guidance_value: float, upscale_factor: int = 16,
-                 tile_size: int = 256, stride: int = 256, num_save: int = 1, num_corrections: int=0, corr_step_size: float=0.01):
+                 tile_size: int = 256, stride: int = 256, num_save: int = 1, num_corrections: int=0, corr_step_size: float=0.01,
+                 star_tile_microbatch: int = 160):
         self.num_steps = t.shape[1]
         self.t = t   #shape (1, num_steps)
         self.num_save = num_save
@@ -406,6 +407,7 @@ class PosteriorSDE():
         self.upscale_factor = upscale_factor   
         self.num_corrections = num_corrections              # 16
         self.corr_step_size = corr_step_size              # 16
+        self.star_tile_microbatch = star_tile_microbatch
 
     def _sigma_t(self, t, ref):
         if isinstance(self.sigma, float):
@@ -446,7 +448,7 @@ class PosteriorSDE():
             raise ValueError("mode must be 'score' or 'vector_field'")
 
     
-    def star_fullres(self, residual, c_zero, t, mode):
+    def star_fullres_old(self, residual, c_zero, t, mode):
         """
         Slides window over star score/vector field to get full-res star score/vector field
         """
@@ -465,6 +467,41 @@ class PosteriorSDE():
                 )  # (B,C,256,256)
                 out[:, :, y0:y0+T, x0:x0+T] = g_tile
         return out
+
+    def star_fullres(self, residual, c_zero, t, mode):
+        """
+        Slides window over star score/vector field to get full-res star score/vector field.
+        Tiles are processed in microbatches to fit GPU memory.
+        """
+        B, C, H, W = residual.shape
+        T = self.tile_size  # 256
+        assert H == 4096 and W == 4096, "tiler assumes 4096x4096"
+
+        # Reshape into tiles preserving the same order as the nested by/bx loops
+        tiles = residual.view(B, C, H // T, T, W // T, T)           # B, C, 16, T, 16, T
+        tiles = tiles.permute(0, 2, 4, 1, 3, 5).contiguous()        # B, 16, 16, C, T, T
+        tiles = tiles.view(-1, C, T, T)                            # (B*256, C, 256, 256)
+
+        g_tile_chunks = []
+        mb = self.star_tile_microbatch
+        total_tiles = tiles.shape[0]
+        for start in range(0, total_tiles, mb):
+            end = min(start + mb, total_tiles)
+            tile_mb = tiles[start:end]
+            c_mb = c_zero.expand(tile_mb.shape[0], -1, -1)
+            t_mb = t.expand(tile_mb.shape[0], *t.shape[1:])
+            cm_mb = torch.zeros(tile_mb.shape[0], *c_zero.shape[1:], device=c_zero.device, dtype=c_zero.dtype)
+
+            g_mb = self.v_reparam(tile_mb, c=c_mb, t=t_mb, context_mask=cm_mb, model="star", mode=mode)
+            g_tile_chunks.append(g_mb)
+
+        g_tiles = torch.cat(g_tile_chunks, dim=0)
+
+        out = g_tiles.view(B, H // T, W // T, C, T, T).permute(0, 3, 1, 4, 2, 5)
+        out = out.reshape(B, C, H, W)
+        return out
+
+
 
     def score(self, y: torch.Tensor, c: torch.Tensor, t: torch.Tensor):
         """
@@ -493,6 +530,11 @@ class PosteriorSDE():
         cm_light = torch.cat([torch.zeros_like(c), torch.ones_like(c)], dim=0)
         sL_low = self.v_reparam(x_light, c_light, t_light, cm_light, model="light", mode="score")/LIGHTSTD   #divide by STD to get score in original space
         return sL_low - sN_low, sL_low, sN_low
+
+    def vector_field(y, c, t, score):
+        t = t.clamp(1e-3, 1.0 - 1e-3)
+        return (score + y)/t       
+        
     def vector_field_light(self, y: torch.Tensor, c: torch.Tensor, t: torch.Tensor):
         """
         Returns low-res posterior vector field (B,C,256,256):
@@ -559,11 +601,11 @@ class PosteriorSDE():
             sigma_t = self._sigma_t(t, ref=y)
             y = y +  (self.vector_field_light(y, c, t[..., None, None, None]) + sL_low*0.5*sigma_t**2) * h 
             y = y + torch.randn_like(y) * sigma_t * (h ** 0.5) #prediction step using prior model
-            if self.num_corrections > 0 and k/self.num_steps > 0.995:
-                score,_,_ = self.score(y, c, t[..., None, None, None])
-                for _ in range(self.num_corrections):
-                    y = y + 0.5*sigma_t**2 * score * self.corr_step_size + torch.randn_like(y) * sigma_t * (self.corr_step_size ** 0.5) #posterior correction
-        
+
+        for _ in range(self.num_corrections):
+            score,_,_ = self.score(y, c, t[..., None, None, None])
+            y = y + 0.5*sigma_t**2 * score * self.corr_step_size + torch.randn_like(y) * sigma_t * (self.corr_step_size ** 0.5) #posterior correction
+
         if (self.num_steps - 1) == next_save_idx:
             ys_saved[-1] = y
         return ys_saved, self.t[0, ret_idx]
