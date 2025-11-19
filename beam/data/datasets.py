@@ -271,6 +271,8 @@ class TESSDataset(Dataset):
                 transforms.ToTensor(),
                 transforms.Normalize(mean=self.MEAN, std=self.STD)
             ])
+            if 60 < int(orbit) < 116:
+                ffi_image = ffi_image*3 # Shorter Cadence in EM1
 
             # Apply transformations
             angles_image = transform(angles_image)

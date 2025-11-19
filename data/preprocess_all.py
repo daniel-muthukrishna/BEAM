@@ -34,26 +34,33 @@ def show_img(
 
 
 def get_angle_files_from_folder(
-    folder: str, orbit_start: int, orbit_end: int
+    folder: str, orbit_start: int, orbit_end: int, skip_orbits: Optional[List[int]] = None
 ) -> List[str]:
     """
     Returns a list of all desired angle files in the given folder.
     """
+    skip_set = set(skip_orbits or [])
     return [
         os.path.join(folder, f"O{i}_altaz.out")
         for i in range(orbit_start, orbit_end + 1)
+        if i not in skip_set
     ]
 
 
 def get_fits_folders_from_root(
-    root_folder: str, orbit_start: int, orbit_end: int
+    root_folder: str,
+    orbit_start: int,
+    orbit_end: int,
+    skip_orbits: Optional[List[int]] = None,
 ) -> List[str]:
     """
     Returns a list of all desired folders containing .fits files in the given folder.
     """
+    skip_set = set(skip_orbits or [])
     return [
         os.path.join(root_folder, f"orbit-{i}/")
         for i in range(orbit_start, orbit_end + 1)
+        if i not in skip_set
     ]
 
 
@@ -72,7 +79,9 @@ class Preprocessing:
         orbit_start=9,
         orbit_end=64,
         camera_number='1',
+        skip_orbits: Optional[List[int]] = None,
     ):
+        self.skip_orbits = {int(o) for o in (skip_orbits or [])}
         self.fits_root_folder = fits_root_folder
         self.angle_folder = angle_folder
         self.ccd_folder = ccd_folder
@@ -94,11 +103,13 @@ class Preprocessing:
         os.makedirs(self.background_ccd_folder, exist_ok=True)
 
         # Generate the raw angle files + fits folders
+        if self.skip_orbits:
+            print(f"Skipping orbits: {sorted(self.skip_orbits)}")
         self.fits_folder_paths = get_fits_folders_from_root(
-            self.fits_root_folder, self.orbit_start, self.orbit_end
+            self.fits_root_folder, self.orbit_start, self.orbit_end, skip_orbits=self.skip_orbits
         )
         self.raw_angles_file_paths = get_angle_files_from_folder(
-            self.raw_angles_folder, self.orbit_start, self.orbit_end
+            self.raw_angles_folder, self.orbit_start, self.orbit_end, skip_orbits=self.skip_orbits
         )
         if not self.raw_angles_file_paths:
             print(f"Warning: No .out files found in {self.raw_angles_folder}!")
@@ -124,7 +135,7 @@ class Preprocessing:
         """
         # loop through all the angle files (by orbit)
         for file_path in self.raw_angles_file_paths:
-            orbit = file_path[36:38] if file_path[38] == "_" else file_path[36:37]
+            orbit = file_path.split("/")[-1].split("_")[0][1:]
             with open(file_path, "r") as file:
                 # get the data from the file
                 for line in file.read().split("\n")[1:]:
@@ -159,8 +170,13 @@ class Preprocessing:
                     data_dic["M3az"] = deg_to_rad(arr[20])
                     data_dic["below_sunshade"] = arr[3] < -5.0 and arr[5] < -5.0
 
+                    if arr[3] < -5.0 and arr[5] < -5.0:
+                        best_orb_value_moon = True
+                
+
                     # saves dictionary of dictionaries to the class
                     self.data_dic[ffi] = data_dic
+
         print(f"Dataset size: {len(self.data_dic)}")
 
         # saves dictionary to computer
@@ -185,7 +201,6 @@ class Preprocessing:
         # Group FFIs by orbit using self.data_dic
         orbit_to_folder = {}
         for i, folder_path in enumerate(self.fits_folder_paths):
-            print(folder_path)
             orbit = folder_path.split("-")[-1][:-1]
                 #folders renamed from O11-54 to orbit-11-54
                 # (
@@ -291,9 +306,11 @@ class Preprocessing:
         self, fits_filename, folder_path, rows_to_delete, columns_to_delete = args
         if (
             len(fits_filename) > 40
-            and fits_filename[-7:] == "fits.gz"
+            and fits_filename.endswith((".fits", ".fits.gz"))
             and fits_filename[27] == self.camera_number #user defined camera number
         ):
+            
+
             arr = self.get_arr(fits_filename, folder_path)
             arr = np.delete(arr, rows_to_delete, axis=0)
             arr = np.delete(arr, columns_to_delete, axis=1)
@@ -316,17 +333,20 @@ class Preprocessing:
         Creates a process for each orbit to process the images in that orbit in parallel
         via calls to image_orbit_worker
         """
+        print(f"Processing images in {len(self.fits_folder_paths)} orbits")
         rows_to_delete = range(2048, 2108)
         columns_to_delete = (
             list(range(0, 44)) + list(range(2092, 2180)) + list(range(4228, 4272))
         )
         orbit_to_folder = {}
+
         for i, fits_folder in enumerate(self.fits_folder_paths):
-            orbit = (
-                fits_folder[27:29]
-                if len(fits_folder) > 29 and fits_folder[29] == "_"
-                else fits_folder[27:28]
-            )
+            # orbit = ( # old orbit naming convention
+            #     fits_folder[27:29]
+            #     if len(fits_folder) > 29 and fits_folder[29] == "_"
+            #     else fits_folder[27:28]
+            # )
+            orbit = fits_folder.split("-")[-1][:-1]
             orbit_to_folder[orbit] = (fits_folder, i)
         orbit_args = []
         for orbit, (folder_path, i) in orbit_to_folder.items():
@@ -354,7 +374,7 @@ class Preprocessing:
         for fits_filename in os.listdir(folder_path):
             if (
                 len(fits_filename) > 40
-                and fits_filename[-7:] == "fits.gz"
+                and fits_filename.endswith((".fits", ".fits.gz"))
                 and fits_filename[27] == self.camera_number
             ):
                 image_args.append(
@@ -393,6 +413,7 @@ class Preprocessing:
             ffi_num = fits_filename[18:26]
             # Only process if ffi_num is in self.data_dic
             if ffi_num not in self.data_dic:
+                print(f"No angle data for {ffi_num}, orbit {orbit}")
                 return  # Skip processing if no angle data
             arr = self.get_arr(fits_filename, folder_path)
             # Remove black bars
@@ -432,6 +453,9 @@ class Preprocessing:
                 orbit_to_subtract = "59"
             if orbit == "61":
                 orbit_to_subtract = "62"
+            if orbit == "63":
+                orbit_to_subtract = "64"
+
 
             bg_path = os.path.join(
                 self.background_ccd_folder, f"O{orbit_to_subtract}_background_ccd.pkl"
@@ -462,7 +486,7 @@ class Preprocessing:
             # Save as pickle
             out_path = os.path.join(
                 self.ccd_folder,
-                f"{fits_filename[:-8]}_processed_im{self.image_size}x{self.image_size}.pkl",
+                f"{fits_filename[:42]}_processed_im{self.image_size}x{self.image_size}.pkl",
             )
 
             with open(out_path, "wb") as file:
@@ -516,6 +540,7 @@ def main():
         orbit_start=config.get("orbit_start", 11),
         orbit_end=config.get("orbit_end", 54),
         camera_number=config.get("camera_number", "1"),
+        skip_orbits=config.get("skip_orbits", []),
     )
     # CLI flags
     preproc.run(

@@ -2,19 +2,19 @@
 fits_folder: /pdo/users/roland/SL_data/
 
 #Path to the folder containing raw angle files 
-raw_angles_folder: /pdo/users/roland/SL_data/altazzes/
+raw_angles_folder: /pdo/users/djtufto/altazzes_new/altazzes/
 
 #Output folder for processed angle data
-angle_folder: /pdo/users/djtufto/cam1/angles/
+angle_folder: /pdo/users/djtufto/cam2/angles/
 
 #Output folder for processed CCD images
-ccd_folder: /pdo/users/djtufto/cam1/ccd/
+ccd_folder: /pdo/users/djtufto/cam2/ccd/
 
 #Output folder for background images
-background_ccd_folder: /pdo/users/djtufto/cam1/bg/
+background_ccd_folder: /pdo/users/djtufto/cam2/bg/
 
 #Filename for processed angle data
-angle_file: angles_O11-54_data_dic.pkl
+angle_file: angles_O11-72_cam_2data_dic.pkl
 
 #(Optional) folder for saving debug images ('' to disable)
 display_images_folder: ''
@@ -22,11 +22,14 @@ display_images_folder: ''
 
 image_size: 256
 
-camera_number: '1'
+camera_number: '2'
 
 #Number of workers to use
 num_workers: 60
 
 #First and last orbit number to process (inclusive)
 orbit_start: 11
-orbit_end: 54
+orbit_end: 72
+
+#List of orbit numbers to skip entirely (leave empty list to process all)
+skip_orbits: [57, 58]
