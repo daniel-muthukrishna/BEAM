@@ -455,6 +455,19 @@ class Preprocessing:
                 orbit_to_subtract = "62"
             if orbit == "63":
                 orbit_to_subtract = "64"
+            if orbit == "80":
+                orbit_to_subtract = "79"
+            if orbit == "82":
+                orbit_to_subtract = "81"
+            if orbit == "84":   
+                orbit_to_subtract = "83"
+            if orbit == "85":
+                orbit_to_subtract = "86"
+            if orbit == "91":
+                orbit_to_subtract = "92"
+            if orbit == "100":
+                orbit_to_subtract = "99"
+            
 
 
             bg_path = os.path.join(
