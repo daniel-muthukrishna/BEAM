@@ -8,6 +8,10 @@ from pathlib import Path
 from tqdm import tqdm
 import argparse
 
+# Configure matplotlib to use LaTeX with xcolor package for colored text
+plt.rcParams['text.usetex'] = True
+plt.rcParams['text.latex.preamble'] = r'\usepackage{xcolor}'
+
 # Import the model and dataset classes from the training script
 from train_angle_to_image import AngleToImageDataset, AngleToImageModel
 
@@ -135,13 +139,35 @@ def create_single_gif(images, output_path, title='', fps=10, vmin=0, vmax=1,
             def fmt_exp(val):
                 return f"{val:.2e}" if isinstance(val, (int, float)) else str(val)
 
+            # Convert angles from radians to degrees
+            def to_degrees(val):
+                return np.degrees(val) if isinstance(val, (int, float)) else val
+
+            # Get ED and MD by inverting 1/ED and 1/MD
+            def get_distance(inv_key):
+                inv_val = meta.get(inv_key, None)
+                if isinstance(inv_val, (int, float)) and inv_val != 0:
+                    return 1.0 / inv_val
+                return 'N/A'
+
+            # Get colored text for Eel and Mel based on sign
+            def get_colored_angle(key):
+                val = to_degrees(meta.get(key, 'N/A'))
+                if isinstance(val, (int, float)):
+                    color = 'blue' if val < 0 else 'red'
+                    return f"\\textcolor{{{color}}}{{{fmt_float(val)}}}"
+                return fmt_float(val)
+
+            ED = get_distance('1/ED')
+            MD = get_distance('1/MD')
+
             params_str = (
-                f"Eel={fmt_float(meta.get('Eel', 'N/A'))}° | "
-                f"Eaz={fmt_float(meta.get('Eaz', 'N/A'))}° | "
-                f"Mel={fmt_float(meta.get('Mel', 'N/A'))}° | "
-                f"Maz={fmt_float(meta.get('Maz', 'N/A'))}° | "
-                f"ED={fmt_exp(meta.get('ED', 'N/A'))} | "
-                f"MD={fmt_exp(meta.get('MD', 'N/A'))} | "
+                f"Eel={get_colored_angle('Eel')}$^\\circ$ | "
+                f"Eaz={fmt_float(to_degrees(meta.get('Eaz', 'N/A')))}$^\\circ$ | "
+                f"Mel={get_colored_angle('Mel')}$^\\circ$ | "
+                f"Maz={fmt_float(to_degrees(meta.get('Maz', 'N/A')))}$^\\circ$ | "
+                f"ED={fmt_exp(ED)} | "
+                f"MD={fmt_exp(MD)} | "
                 f"Below sunshade={meta.get('below_sunshade', 'N/A')}"
             )
             params_text.set_text(params_str)
@@ -206,13 +232,35 @@ def create_sidebyside_gif(ground_truths, predictions, output_path, fps=10, vmin=
             def fmt_exp(val):
                 return f"{val:.2e}" if isinstance(val, (int, float)) else str(val)
 
+            # Convert angles from radians to degrees
+            def to_degrees(val):
+                return np.degrees(val) if isinstance(val, (int, float)) else val
+
+            # Get ED and MD by inverting 1/ED and 1/MD
+            def get_distance(inv_key):
+                inv_val = meta.get(inv_key, None)
+                if isinstance(inv_val, (int, float)) and inv_val != 0:
+                    return 1.0 / inv_val
+                return 'N/A'
+
+            # Get colored text for Eel and Mel based on sign
+            def get_colored_angle(key):
+                val = to_degrees(meta.get(key, 'N/A'))
+                if isinstance(val, (int, float)):
+                    color = 'blue' if val < 0 else 'red'
+                    return f"\\textcolor{{{color}}}{{{fmt_float(val)}}}"
+                return fmt_float(val)
+
+            ED = get_distance('1/ED')
+            MD = get_distance('1/MD')
+
             params_str = (
-                f"Eel={fmt_float(meta.get('Eel', 'N/A'))}° | "
-                f"Eaz={fmt_float(meta.get('Eaz', 'N/A'))}° | "
-                f"Mel={fmt_float(meta.get('Mel', 'N/A'))}° | "
-                f"Maz={fmt_float(meta.get('Maz', 'N/A'))}° | "
-                f"ED={fmt_exp(meta.get('ED', 'N/A'))} | "
-                f"MD={fmt_exp(meta.get('MD', 'N/A'))} | "
+                f"Eel={get_colored_angle('Eel')}$^\\circ$ | "
+                f"Eaz={fmt_float(to_degrees(meta.get('Eaz', 'N/A')))}$^\\circ$ | "
+                f"Mel={get_colored_angle('Mel')}$^\\circ$ | "
+                f"Maz={fmt_float(to_degrees(meta.get('Maz', 'N/A')))}$^\\circ$ | "
+                f"ED={fmt_exp(ED)} | "
+                f"MD={fmt_exp(MD)} | "
                 f"Below sunshade={meta.get('below_sunshade', 'N/A')}"
             )
             params_text.set_text(params_str)

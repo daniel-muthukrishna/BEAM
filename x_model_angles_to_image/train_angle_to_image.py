@@ -87,15 +87,6 @@ class AngleToImageDataset(Dataset):
 
         image = torch.from_numpy(image).float()
 
-        # Images are already preprocessed, just normalize to [0, 1] range
-        # Using a robust normalization approach
-        image_min = image.min()
-        image_max = image.max()
-        if image_max > image_min:
-            image = (image - image_min) / (image_max - image_min)
-        else:
-            image = torch.zeros_like(image)
-
         # Add channel dimension: (1, H, W)
         image = image.unsqueeze(0)
 
