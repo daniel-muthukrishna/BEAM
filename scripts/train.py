@@ -54,7 +54,9 @@ def prepare_dataset(config):
         background_path=config['data_background_path'],
         image_shape=config['data_image_shape'],
         patch_size=config.get('data_patch_size', None),
-        repeat_factor=config.get('data_repeat_factor', 1)
+        repeat_factor=config.get('data_repeat_factor', 1),
+        mean=config.get('data_mean', 0.01978608595999928),
+        std=config.get('data_std', 0.08876927679677006),
     )
     presplit_time = time.time()
     # Create training and validation splits based on orbit number (fast, metadata only)
@@ -119,7 +121,9 @@ def create_callbacks(config, args, rank):
                 log_samples_freq=config.get('wandb_log_samples_freq', 5),
                 log_model_freq=config.get('wandb_log_model_freq', 20),
                 use_wandb=True,
-                mode=args.wandb
+                mode=args.wandb,
+                mean=config.get('data_mean', 0.01978608595999928),
+                std=config.get('data_std', 0.08876927679677006)
             )
             callbacks.append(wandb_callback)
     

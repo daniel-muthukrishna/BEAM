@@ -133,7 +133,9 @@ def log_sample_images(
     image_shape: Tuple[int, int] = (64, 64),
     step: int = None,
     name: str = "Training Set",  # "Training" or "Validation"
-    ema: Optional[EMA] = None
+    ema: Optional[EMA] = None,
+    mean: float = 0.01978608595999928,
+    std: float = 0.08876927679677006,
 ) -> None:
     """
     Generate samples and log them to W&B with original and generated images side by side.
@@ -147,20 +149,12 @@ def log_sample_images(
         image_shape: Shape of the images
         step: Optional step number (e.g., epoch)
         name: Name for the log (e.g., "Training Set", "Validation Set")
+        ema: Optional EMA model
+        mean: Mean of the data
+        std: Standard deviation of the data
     """
-    # MEAN = 0.1154092
-    # STD =  0.2346011
-    # MEAN = 0.65187982
-    # STD =  1.10163832
-    # MEAN = 0.08837062429384838 
-    # STD =  0.8176902707359797
-    #full
-    # MEAN = 0.1099859
-    # STD =  0.8313040
-    #256x256
-    MEAN = 0.01978608595999928
-    STD =  0.08876927679677006
-    
+    MEAN = mean
+    STD = std
     if ema is not None:
         ema.store(model)
         ema.copy_to(model)

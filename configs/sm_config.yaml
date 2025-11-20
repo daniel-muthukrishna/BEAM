@@ -18,28 +18,30 @@ data:
   image_shape: [256,256]  # Shape of the images
   patch_size: null # Shape of the patches; null for no patches
   repeat_factor: 1 # Iterate repeat_factor times over the dataset each epoch
+  mean: 0.01978608595999928 #Dataset mean (for normalization)
+  std: 0.08876927679677006 #Dataset standard deviation (for normalization)
 
 ema:
-  beta: 0.9999
-  update_after_step: 10000
+  beta: 0.9999 #EMA decay rate
+  update_after_step: 10000 #Number of warmupsteps before updating EMA
 
 optimizer:
-  max_lr: 0.0001
-  min_lr: 0.000001
-  weight_decay: 0.01
-  warmup_steps: 1000 
-  grad_clip: 1.0 
+  max_lr: 0.0001 #Maximum learning rate
+  min_lr: 0.000001 #Minimum learning rate
+  weight_decay: 0.01 #Weight decay
+  warmup_steps: 1000 #Number of warmup steps
+  grad_clip: 1.0 #Gradient clip
 
 # Training parameters
 training:
   n_epoch: 200          # Maximum number of epochs
   batch_size: 32         # Batch size
   patience: 10000          # Early stopping patience
-  mixed_precision: True # Use FP16 for training
+  mixed_precision: True # Use BF16 for training
 
 # Checkpoint parameters
 checkpoint:
-  save_model: False       # Save model checkpoints
+  save_model: True       # Save model checkpoints
   epoch_checkpoint: 100  # Save samples every N epochs
   checkpoint_gpu: 0      # GPU ID to use for checkpoints
   save_weights_only: False # Save only weights

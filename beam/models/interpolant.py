@@ -25,7 +25,6 @@ class ScoreMatch(nn.Module):
         t = torch.rand(B, 1, 1, 1, device=self.device) * (1. - self.epsilon) + self.epsilon #(BATCH_SIZE, 1, 1, 1)
         #Forward
         x_t,eps, alpha_t, beta_t = self.probability_path.sample_conditional(x, t)
-        # print(f'BATCH SIZE: {B}')
 
 
         drop = torch.bernoulli(torch.full((B, 1, 1), self.drop_prob, device=self.device, dtype=c.dtype))
@@ -48,14 +47,15 @@ class ScoreMatch(nn.Module):
             
             #v param:
             v_pred = self.nn_model(x_t, c, t, context_mask)
-            v_ref = alpha_t * eps - beta_t * x
+            v_ref = alpha_t * eps - beta_t * x #specific to VP schedule
             v_ref = v_ref.detach()
             batch_losses = self.loss_fn(v_pred, v_ref)
+
         #flow matching obj
         elif self.architecture == "flow":
             flow_pred = self.nn_model(x_t, c, t, context_mask) 
             # flow_ref, beta_t = self.probability_path.conditional_vector_field(x_t, x, t)
-            flow_ref = x - eps 
+            flow_ref = x - eps #specific to OT schedule
             flow_ref = flow_ref.detach()
             batch_losses = self.loss_fn(flow_pred, flow_ref)
             

@@ -62,7 +62,10 @@ class TESSDataset(Dataset):
         background_path: str,
         image_shape: Tuple[int, int],
         patch_size: Optional[Tuple[int, int]] = None,
-        repeat_factor: int = 1
+        repeat_factor: int = 1,
+        camera_number: str = '3',
+        mean: float = 0.01978608595999928,
+        std: float = 0.08876927679677006,
     ):
         start_time = time.time()
         # Define paths and parameters
@@ -77,7 +80,7 @@ class TESSDataset(Dataset):
 
         self.cache = MMapCache(max_open=512)
         self.bg_cache = MMapCache(max_open=50)
-
+        self.camera_number = camera_number
 
      
         if self.patch_size is not None:
@@ -109,8 +112,8 @@ class TESSDataset(Dataset):
         # self.MEAN = 0.08837062429384838 
         # self.STD =  0.8176902707359797
         #256x256
-        self.MEAN = 0.01978608595999928
-        self.STD =  0.08876927679677006
+        self.MEAN = mean
+        self.STD = std
 
         self.bg_scale = torch.tensor(1.0/633118.0, dtype=torch.float32)
         
@@ -120,19 +123,7 @@ class TESSDataset(Dataset):
         self.ffi_nums = []
 
         self._cache = None
-        # with open("/pdo/users/djtufto/data/data_tess_4096_raw/stars.pkl", "rb") as f:
-        #     self.star_dict = pickle.load(f)
-        # for value in self.star_dict:
-        #     for patch in value:
-        #         x,y = value[patch]["x"], value[patch]["y"]
-        #         x = np.rint(x).astype(int)
-        #         y = np.rint(y).astype(int)
-        #         value[patch]["x"] = x
-        #         value[patch]["y"] = y
-        #         mask = np.zeros((self.ph, self.pw))
-        #         mask[y,x] = 1
-        #         mask = binary_dilation(mask, structure=np.ones((3,3), bool))
-        #         value[patch]["mask"] = mask
+
         
 
         # Load all files in the ccd_folder that have corresponding angle data 
@@ -184,99 +175,36 @@ class TESSDataset(Dataset):
         angles = self.angles_dic[ffi_num]
         orbit = angles['orbit']
 
-        # background_path = os.path.join(self.background_path, self.background_dic[int(orbit)])
         # Prepare orbital parameters (12 values)
         params = np.array([
             angles['1/ED'], angles['1/MD'], 
             angles['1/ED^2'], angles['1/MD^2'], 
             angles['Eel'], angles['Eaz'], 
             angles['Mel'], angles['Maz'], 
-            angles['E3el'], angles['E3az'], 
-            angles['M3el'], angles['M3az']
+            angles['E' + self.camera_number + 'el'], angles['E' + self.camera_number + 'az'], 
+            angles['M' + self.camera_number + 'el'], angles['M' + self.camera_number + 'az']
         ])
         
-   
-        if self.patch_size is not None:
-            # background_arr = np.load(background_path, mmap_mode='r')
-            # image_arr = np.load(file_path, mmap_mode='r')
-            # params = params.astype(np.float32, copy=False)
-            # angles_image = torch.from_numpy(params).unsqueeze(0)
-            # # Return one random patch:
-            # patch_idx = torch.randint(self.num_patches, (1,))
-            # # patch_idx = torch.tensor(0)
-            
-            # patch_row, patch_col = divmod(patch_idx.item(), self.patch_x)
-            # conditioning_loc = torch.cat([self.row_embeds[patch_row], self.col_embeds[patch_col]], dim=-1).unsqueeze(0)
-            # top, left = patch_row*self.ph, patch_col*self.pw
-            # ffi_image = image_arr[top:top+self.ph, left:left+self.pw]
-            # angles_image = torch.cat([angles_image, conditioning_loc], dim=1)
-            # background_image = background_arr[top:top+self.ph, left:left+self.pw].astype(np.float32, copy=False)
-            # background_image = torch.from_numpy(1/633118 * background_image).unsqueeze(0)
-            # ffi_image = torch.from_numpy(ffi_image).unsqueeze(0) - background_image
-            # ffi_image = (ffi_image-self.MEAN)/self.STD
+        image_arr = pickle.load(open(file_path, "rb"))
+        ffi_image = Image.fromarray(image_arr.flatten())
+        angles_image = Image.fromarray(params)
+        # Define transformations
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            lambda s: s.reshape(1, angles_image.size[1])  # Reshape to 1×N tensor
+        ])
+        target_transform = transforms.Compose([
+            lambda s: np.array(s),
+            lambda s: s.reshape(self.image_shape),  # Reshape to the target image size
+            transforms.ToTensor(),
+            transforms.Normalize(mean=self.MEAN, std=self.STD)
+        ])
+        if 60 < int(orbit) < 116:
+            ffi_image = ffi_image*3 # Shorter Cadence in EM1
 
-    
-            # bg_arr = self._get_mmap(background_path, self.bg_cache)
-            img_arr = np.load(file_path, mmap_mode="r")
-            # star_dict = self.star_dict[int(orbit)-10]
-
-
-            # random patch index
-            patch_idx = torch.randint(self.num_patches, (1,)).item()
-            pr, pc = divmod(patch_idx, self.patch_x)
-            top, left = pr*self.ph, pc*self.pw
-            sl = np.s_[top:top+self.ph, left:left+self.pw]
-
-            # star_dict = star_dict[patch_idx]
-            # patch_x = star_dict["x"]
-            # patch_y = star_dict["y"]
-
-
-            # slices are views on the memmap; convert once to torch
-            # bg_np  = np.asarray(bg_arr[sl],  dtype=np.float32, order='C')
-            # img_np = np.asarray(img_arr[sl],  dtype=np.float32, order='C')
-            img = torch.tensor(img_arr[sl], dtype=torch.float32)         # new tensor
-
-            # bg  = torch.tensor(bg_arr[sl], dtype=torch.float32)            # new tensor
-            # bg.mul_(self.bg_scale)
-
-            # CHW
-            img = img.unsqueeze(0)
-            # bg  = bg.unsqueeze(0)
-
-            # subtract + norm
-            # img.sub_(bg)
-            img.sub_(self.MEAN).div_(self.STD)
-
-            angles = torch.from_numpy(params).to(torch.float32).unsqueeze(0)
-            cond   = torch.cat([self.row_embeds[pr], self.col_embeds[pc]], dim=-1).unsqueeze(0)
-            angles = torch.cat([angles, cond], dim=1)
-
-            # mask = torch.from_numpy(star_dict["mask"]).unsqueeze(0)
-            ffi_image = img
-            angles_image = angles
-
-        else:
-            image_arr = pickle.load(open(file_path, "rb"))
-            ffi_image = Image.fromarray(image_arr.flatten())
-            angles_image = Image.fromarray(params)
-            # Define transformations
-            transform = transforms.Compose([
-                transforms.ToTensor(),
-                lambda s: s.reshape(1, angles_image.size[1])  # Reshape to 1×N tensor
-            ])
-            target_transform = transforms.Compose([
-                lambda s: np.array(s),
-                lambda s: s.reshape(self.image_shape),  # Reshape to the target image size
-                transforms.ToTensor(),
-                transforms.Normalize(mean=self.MEAN, std=self.STD)
-            ])
-            if 60 < int(orbit) < 116:
-                ffi_image = ffi_image*3 # Shorter Cadence in EM1
-
-            # Apply transformations
-            angles_image = transform(angles_image)
-            ffi_image = target_transform(ffi_image)
+        # Apply transformations
+        angles_image = transform(angles_image)
+        ffi_image = target_transform(ffi_image)
         return {
             "x": angles_image,       # Orbital parameters (1×12 vector)
             "y": ffi_image,          # Image (64×64 or other size)
@@ -306,39 +234,6 @@ def embed_patch(prow, embed_dim):
         torch.cos(row_scaled),
     ], dim=-1)
 
-
-
-#CURRENTLY NOT USED
-# def create_train_valid_datasets(
-#     dataset: Dataset, 
-#     train_split_criteria: callable, 
-#     valid_split_criteria: callable
-# ) -> Tuple[Subset, Subset]:
-#     """
-#     Create training and validation datasets from a full dataset.
-    
-#     Args:
-#         dataset: The complete dataset
-#         train_split_criteria: Function to determine if a sample belongs to the training set
-#         valid_split_criteria: Function to determine if a sample belongs to the validation set
-        
-#     Returns:
-#         Tuple of (training dataset, validation dataset)
-#     """
-#     train_indices = [
-#         idx for idx in range(len(dataset)) 
-#         if train_split_criteria(dataset[idx])
-#     ]
-    
-#     valid_indices = [
-#         idx for idx in range(len(dataset)) 
-#         if valid_split_criteria(dataset[idx])
-#     ]
-    
-#     train_dataset = Subset(dataset, train_indices)
-#     valid_dataset = Subset(dataset, valid_indices)
-    
-#     return train_dataset, valid_dataset
 
 
 def create_train_valid_datasets_by_orbit(dataset: TESSDataset, orbit_threshold: int = 47):

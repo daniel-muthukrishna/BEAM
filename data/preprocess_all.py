@@ -133,6 +133,10 @@ class Preprocessing:
         Returns: None
         Processes the angles in the angle file and saves the data to the class
         """
+        Eel_idx = 7 + (int(self.camera_number) - 1) * 2
+        Eaz_idx = 8 + (int(self.camera_number) - 1) * 2
+        Mel_idx = 5 + (int(self.camera_number) - 1) * 2
+        Maz_idx = 6 + (int(self.camera_number) - 1) * 2
         # loop through all the angle files (by orbit)
         for file_path in self.raw_angles_file_paths:
             orbit = file_path.split("/")[-1].split("_")[0][1:]
@@ -153,6 +157,8 @@ class Preprocessing:
                     dist_scaled_inverse_sqrd = lambda x: round(1 / (x / 50) ** 2, 5)
 
                     # creates dictionary of values for each ffi
+
+                   
                     data_dic = {}
                     data_dic["ffi"] = ffi
                     data_dic["orbit"] = str(orbit)
@@ -164,14 +170,12 @@ class Preprocessing:
                     data_dic["Eaz"] = deg_to_rad(arr[4])
                     data_dic["Mel"] = deg_to_rad(arr[5])
                     data_dic["Maz"] = deg_to_rad(arr[6])
-                    data_dic["E3el"] = deg_to_rad(arr[11])
-                    data_dic["E3az"] = deg_to_rad(arr[12])
-                    data_dic["M3el"] = deg_to_rad(arr[19])
-                    data_dic["M3az"] = deg_to_rad(arr[20])
+                    data_dic["E" + self.camera_number + "el"] = deg_to_rad(arr[Eel_idx])
+                    data_dic["E" + self.camera_number + "az"] = deg_to_rad(arr[Eaz_idx])
+                    data_dic["M" + self.camera_number + "el"] = deg_to_rad(arr[Mel_idx])
+                    data_dic["M" + self.camera_number + "az"] = deg_to_rad(arr[Maz_idx])
                     data_dic["below_sunshade"] = arr[3] < -5.0 and arr[5] < -5.0
 
-                    if arr[3] < -5.0 and arr[5] < -5.0:
-                        best_orb_value_moon = True
                 
 
                     # saves dictionary of dictionaries to the class
@@ -481,7 +485,8 @@ class Preprocessing:
                     f"Warning: Background file {bg_path} not found. Skipping subtraction for {fits_filename}."
                 )
             # Pixel scaling
-            arr *= 1 / 633118
+            scale_factor = 1 / 633118 
+            arr *= scale_factor
             # Save debug images if requested
             if self.display_images_folder and not os.listdir(
                 self.display_images_folder

@@ -42,7 +42,9 @@ class WeightsAndBiasesCallback(Callback):
         log_samples_freq: int = 5, 
         log_model_freq: int = 20,
         use_wandb: bool = True,
-        mode: str = "online"
+        mode: str = "online",
+        mean: float = 0.01978608595999928,
+        std: float = 0.08876927679677006,
     ):
         super().__init__()
         self.project_name = project_name
@@ -146,7 +148,9 @@ class WeightsAndBiasesCallback(Callback):
                     image_shape=trainer.config['data_image_shape'] if trainer.config['data_patch_size'] is None else trainer.config.get('data_patch_size'),
                     step=self.current_step,
                     name="Training Set",
-                    ema=trainer.ema
+                    ema=trainer.ema,
+                    mean=self.mean,
+                    std=self.std
                 )
                 
                 # Log validation samples
@@ -159,7 +163,9 @@ class WeightsAndBiasesCallback(Callback):
                     image_shape=trainer.config['data_image_shape'] if trainer.config['data_patch_size'] is None else trainer.config.get('data_patch_size'),
                     step=self.current_step,
                     name="Validation Set",
-                    ema=trainer.ema
+                    ema=trainer.ema,
+                    mean=self.mean,
+                    std=self.std
                 )
             except Exception as e:
                 print(f"Warning: Failed to log sample images to W&B: {e}")
