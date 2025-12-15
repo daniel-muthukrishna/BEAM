@@ -57,6 +57,7 @@ def prepare_dataset(config):
         repeat_factor=config.get('data_repeat_factor', 1),
         mean=config.get('data_mean', 0.01978608595999928),
         std=config.get('data_std', 0.08876927679677006),
+        camera_number=config.get('data_camera_number', '3'),
     )
     presplit_time = time.time()
     # Create training and validation splits based on orbit number (fast, metadata only)

@@ -25,7 +25,7 @@ image_size: 256
 camera_number: '2'
 
 #Number of workers to use
-num_workers: 60
+num_workers: 50
 
 #First and last orbit number to process (inclusive)
 orbit_start: 11

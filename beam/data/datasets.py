@@ -127,9 +127,13 @@ class TESSDataset(Dataset):
         
 
         # Load all files in the ccd_folder that have corresponding angle data 
+        print("Witholding orbits (43, 44) for testing")
         for filename in os.listdir(self.ccd_folder):
             ffi_num = filename[18:18+8]
             if ffi_num in self.angles_dic.keys():
+                orbit = self.angles_dic[ffi_num]["orbit"]
+                if orbit in (43, 44):
+                    continue
                 self.files.append(filename)
                 self.ffi_nums.append(ffi_num)
                 self.length += 1
@@ -199,12 +203,14 @@ class TESSDataset(Dataset):
             transforms.ToTensor(),
             transforms.Normalize(mean=self.MEAN, std=self.STD)
         ])
-        if 60 < int(orbit) < 116:
-            ffi_image = ffi_image*3 # Shorter Cadence in EM1
+     
 
         # Apply transformations
         angles_image = transform(angles_image)
         ffi_image = target_transform(ffi_image)
+
+        if 60 < int(orbit) < 116:
+            ffi_image = ffi_image*3 # Shorter Cadence in EM1
         return {
             "x": angles_image,       # Orbital parameters (1×12 vector)
             "y": ffi_image,          # Image (64×64 or other size)
@@ -236,7 +242,7 @@ def embed_patch(prow, embed_dim):
 
 
 
-def create_train_valid_datasets_by_orbit(dataset: TESSDataset, orbit_threshold: int = 47):
+def create_train_valid_datasets_by_orbit(dataset: TESSDataset, orbit_threshold: int = 100):
     """
     Create training and validation datasets from a TESSDataset using orbit number as the split criterion.
     Orbits <= orbit_threshold go to training, orbits > orbit_threshold go to validation.

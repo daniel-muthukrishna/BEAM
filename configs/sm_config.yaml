@@ -5,22 +5,24 @@ model:
   n_feat: 128           # Number of features in U-Net
   epsilon: 0.0001          # Bound t for stability
   drop_prob: 0.1         # Dropout probability for classifier-free guidance
-  architecture: "noise"   # Architecture to use for the model
+  architecture: "flow"   # Architecture to use for the model
   channel_mults: [1, 1, 2, 2, 2] # Channel multipliers for the U-Net: layer i has n_feat*channel_mults[i] features
   heads_at: [2,3,4] # Use attention at these indices in above channel_mults
   num_res: 2 # Number of residual blocks in each layer; if int, same for all layers
 
 # Data parameters  
 data:
-  angle_path: "/pdo/users/djtufto/data/data_tess_4096_raw/angles/tess_angles_O11-54_data_dic.pkl"  # Path to angle data
-  ccd_folder: /pdo/users/jlupoiii/TESS/data/processed_images_im256x256/ # Folder containing processed images
+  angle_path: "/pdo/users/djtufto/cam2/angles/angles_O11-116_cam_2data_dic.pkl"  # Path to angle data
+  ccd_folder: /pdo/users/djtufto/cam2/ccd/ # Folder containing processed images
   background_path: null
   image_shape: [256,256]  # Shape of the images
   patch_size: null # Shape of the patches; null for no patches
   repeat_factor: 1 # Iterate repeat_factor times over the dataset each epoch
-  mean: 0.01978608595999928 #Dataset mean (for normalization)
-  std: 0.08876927679677006 #Dataset standard deviation (for normalization)
-
+  # mean: 0.01978608595999928 #Dataset mean (for normalization)
+  # std: 0.08876927679677006 #Dataset standard deviation (for normalization)
+  mean: 0.6948966258028931 
+  std: 5.548760451121217
+  camera_number: '2'
 ema:
   beta: 0.9999 #EMA decay rate
   update_after_step: 10000 #Number of warmupsteps before updating EMA
@@ -42,7 +44,7 @@ training:
 # Checkpoint parameters
 checkpoint:
   save_model: True       # Save model checkpoints
-  epoch_checkpoint: 100  # Save samples every N epochs
+  epoch_checkpoint: 50  # Save samples every N epochs
   checkpoint_gpu: 0      # GPU ID to use for checkpoints
   save_weights_only: False # Save only weights
   save_best_only: True # Save best model only at each checkpoint. 
@@ -52,14 +54,14 @@ wandb:
   enabled: True         # Enable W&B logging
   project: "beam-tess"   # W&B project name
   mode: "online"         # W&B mode (online, offline, disabled)
-  log_freq: 100           # Log batch metrics every N batches (higher value = less traffic)
-  log_samples_freq: 50   # Log sample images every N epochs
-  log_model_freq: 100     # Log model weights every N epochs
-  model_name: "SM-Processed-256"     # Base name for the model and W&B run
+  log_freq: 10           # Log batch metrics every N batches (higher value = less traffic)
+  log_samples_freq: 10   # Log sample images every N epochs
+  log_model_freq: 10    # Log model weights every N epochs
+  model_name: "Camera_2_O11-116_256x256"     # Base name for the model and W&B run
   
 # Paths
 paths:
-  save_dir: "model_outputs/conditional_noise"  # Directory to save model and results
+  save_dir: "model_outputs/cam2_full"  # Directory to save model and results
   
 # Distributed training
 distributed:

@@ -95,6 +95,7 @@ class Preprocessing:
         self.orbit_start = orbit_start
         self.orbit_end = orbit_end
         self.camera_number = camera_number
+        self.skipped_orbits = set()
         # creates folders if they don't exist
         os.makedirs(self.ccd_folder, exist_ok=True)
         if self.display_images_folder:
@@ -360,7 +361,7 @@ class Preprocessing:
         with multiprocessing.Pool(self.num_workers) as pool:
             for _ in pool.imap_unordered(Preprocessing.image_orbit_worker, orbit_args):
                 continue
-
+        print(f"Skipped orbits: {sorted(self.skipped_orbits)}")
     @staticmethod
     def image_orbit_worker(args) -> None:
         """
@@ -417,7 +418,7 @@ class Preprocessing:
             ffi_num = fits_filename[18:26]
             # Only process if ffi_num is in self.data_dic
             if ffi_num not in self.data_dic:
-                print(f"No angle data for {ffi_num}, orbit {orbit}")
+                print(f"No angle data for {ffi_num}")
                 return  # Skip processing if no angle data
             arr = self.get_arr(fits_filename, folder_path)
             # Remove black bars
@@ -467,10 +468,15 @@ class Preprocessing:
                 orbit_to_subtract = "83"
             if orbit == "85":
                 orbit_to_subtract = "86"
+            if orbit == "87":
+                orbit_to_subtract = "88"
+            if orbit == "89":
+                orbit_to_subtract = "90"
             if orbit == "91":
                 orbit_to_subtract = "92"
             if orbit == "100":
                 orbit_to_subtract = "99"
+            
             
 
 
@@ -484,6 +490,7 @@ class Preprocessing:
                 print(
                     f"Warning: Background file {bg_path} not found. Skipping subtraction for {fits_filename}."
                 )
+                self.skipped_orbits.add(orbit)
             # Pixel scaling
             scale_factor = 1 / 633118 
             arr *= scale_factor

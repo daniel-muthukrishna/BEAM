@@ -30,4 +30,4 @@ generation:
   output_dir: "model_outputs/orbit43/" # Directory to save generated images
   orbit_range: [43] # Orbit range to sample from
   ema: True # Use EMA weights for sampling
-  guidance_scale: 1.2 # Guidance scale for sampling
+  guidance_scale: 1.0 # Guidance scale for sampling
