@@ -114,8 +114,7 @@ class TESSDataset(Dataset):
         #256x256
         self.MEAN = mean
         self.STD = std
-
-        self.bg_scale = torch.tensor(1.0/633118.0, dtype=torch.float32)
+        print(self.MEAN, self.STD)
         
         # Find all valid image files that have corresponding angle data
         # store files for use in __getitem__
@@ -124,20 +123,22 @@ class TESSDataset(Dataset):
 
         self._cache = None
 
+        with open(f'/pdo/users/djtufto/cam{self.camera_number}/skip.txt', 'r') as f:
+            skip_set = set(line.strip() for line in f)
         
-
+        self.skip_count = 0
         # Load all files in the ccd_folder that have corresponding angle data 
-        print("Witholding orbits (43, 44) for testing")
         for filename in os.listdir(self.ccd_folder):
             ffi_num = filename[18:18+8]
             if ffi_num in self.angles_dic.keys():
-                orbit = self.angles_dic[ffi_num]["orbit"]
-                if orbit in (43, 44):
+                if filename in skip_set:
+                    self.skip_count += 1
                     continue
+                orbit = self.angles_dic[ffi_num]["orbit"]
                 self.files.append(filename)
                 self.ffi_nums.append(ffi_num)
                 self.length += 1
-
+        print(f"Skipped {self.skip_count} files")
         # Convert to tuples to prevent reordering
         self.files = tuple(self.files)
         self.ffi_nums = tuple(self.ffi_nums)
@@ -172,6 +173,7 @@ class TESSDataset(Dataset):
         """
         file_path = os.path.join(self.ccd_folder, self.files[idx])
         ffi_num = self.ffi_nums[idx]
+        file_name = self.files[idx]
         
 
         # Load image data
@@ -216,7 +218,45 @@ class TESSDataset(Dataset):
             "y": ffi_image,          # Image (64×64 or other size)
             "ffi_num": ffi_num,      # FFI identification number
             "orbit": orbit, # Orbit number
+            "file_name": file_name, # File name
             }
+class TESSDataset_angles_only(Dataset):
+    """
+    Dataset for TESS (Transiting Exoplanet Survey Satellite) orbital parameters only.
+    """
+    def __init__(self, angle_path, camera_number: str = '2'):
+        self.angles_dic = pickle.load(open(angle_path, "rb"))
+        self.ffi_nums = list(self.angles_dic.keys())
+        self.length = len(self.ffi_nums)
+        self.camera_number = camera_number
+    
+    def __getitem__(self, idx: int) -> Dict[str, Union[torch.Tensor, str]]:
+        ffi_num = self.ffi_nums[idx]
+        angles = self.angles_dic[ffi_num]
+        params = np.array([
+            angles['1/ED'], angles['1/MD'], 
+            angles['1/ED^2'], angles['1/MD^2'], 
+            angles['Eel'], angles['Eaz'], 
+            angles['Mel'], angles['Maz'], 
+            angles['E' + self.camera_number + 'el'], angles['E' + self.camera_number + 'az'], 
+            angles['M' + self.camera_number + 'el'], angles['M' + self.camera_number + 'az']
+        ])
+        
+        angles_image = Image.fromarray(params)
+        # Define transformations
+        transform = transforms.Compose([
+            transforms.ToTensor(),
+            lambda s: s.reshape(1, angles_image.size[1])  
+        ])
+
+        angles_image = transform(angles_image)
+        return {
+            "x": angles_image,
+            "ffi_num": ffi_num
+        }
+    def __len__(self) -> int:
+        return self.length
+    
 
 def embed_patch(prow, embed_dim):
     """
@@ -242,7 +282,7 @@ def embed_patch(prow, embed_dim):
 
 
 
-def create_train_valid_datasets_by_orbit(dataset: TESSDataset, orbit_threshold: int = 100):
+def create_train_valid_datasets_by_orbit(dataset: TESSDataset, orbit_threshold: int = 90, max_orbit: int = 100):
     """
     Create training and validation datasets from a TESSDataset using orbit number as the split criterion.
     Orbits <= orbit_threshold go to training, orbits > orbit_threshold go to validation.
@@ -260,11 +300,13 @@ def create_train_valid_datasets_by_orbit(dataset: TESSDataset, orbit_threshold: 
     ]
     valid_indices = [
         idx for idx, ffi_num in enumerate(dataset.ffi_nums)
-        if int(dataset.angles_dic[ffi_num]["orbit"]) > orbit_threshold
+        if int(dataset.angles_dic[ffi_num]["orbit"]) > orbit_threshold and int(dataset.angles_dic[ffi_num]["orbit"]) <= max_orbit
     ]
     train_dataset = Subset(dataset, train_indices * dataset.repeat_factor)
     valid_dataset = Subset(dataset, valid_indices * dataset.repeat_factor)
     return train_dataset, valid_dataset
+
+
 
 
 class TESS_4096_original_images(Dataset):

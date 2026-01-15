@@ -22,7 +22,7 @@ from beam.models.probabilitypath import GaussianProbabilityPath, OTAlpha, OTBeta
 from beam.models.interpolant import ScoreMatch, EMA
 from beam.utils.config import load_config, flatten_config
 from beam.utils.visualization import plot_samples   
-from beam.data.datasets import TESSDataset, create_train_valid_datasets_by_orbit
+from beam.data.datasets import TESSDataset, create_train_valid_datasets_by_orbit, TESSDataset_angles_only
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 import torch.nn.functional as F
@@ -113,6 +113,57 @@ def load_params(params_file, n_samples=5):
         print(f"No parameters file found, using {n_samples} random parameters")
         return torch.rand((n_samples, 1, 12))
 
+import numpy as np
+import matplotlib.pyplot as plt
+
+def plot_generated(x_gen, param_vec, save_path, MEAN, STD, ffi=None):
+    if len(x_gen.shape) == 3:
+        x_gen = x_gen.unsqueeze(1)
+
+    n_sample = x_gen.shape[0]
+    ncols = n_sample
+
+    fig, axes = plt.subplots(1, ncols, figsize=(max(3 * ncols, 5), 4))
+    axes = np.atleast_1d(axes).ravel()
+
+    normval = 633118.0 / 1800.0
+    fig.subplots_adjust(left=0.12, right=0.84, top=0.85, bottom=0.28)  
+
+    
+    if ffi is not None:
+        fig.suptitle(f"FFI {ffi}", fontsize=14)
+
+    ims = []
+    for j in range(n_sample):
+        im = axes[j].imshow(
+            (x_gen[j, 0].cpu().numpy() * STD + MEAN) * normval,
+            cmap="viridis",
+            vmin=0, vmax=normval, extent=[0, 4096, 0, 4096]
+        )
+        ims.append(im)
+        axes[j].set_title(f"Generated Light {j+1}")
+
+    cbar = fig.colorbar(ims[0], ax=axes, fraction=0.03, pad=0.02, label= 'counts/s')
+    cbar.ax.tick_params(labelsize=9)
+
+    pos = axes[0].get_position()
+    dx = 0.05  
+    axes[0].set_position([pos.x0 - dx, pos.y0, pos.width, pos.height])
+    cpos = cbar.ax.get_position()
+    cbar.ax.set_position([cpos.x0 - dx, cpos.y0, cpos.width, cpos.height])
+
+    param_text = (
+        f"1/ED: {param_vec[0]:.3f} | 1/MD: {param_vec[1]:.3f} | 1/ED²: {param_vec[2]:.3f} | 1/MD²: {param_vec[3]:.3f}\n"
+        f"E_el/az: {param_vec[4]:.1f}/{param_vec[5]:.1f} | M_el/az: {param_vec[6]:.1f}/{param_vec[7]:.1f}\n"
+        f"E2_el/az: {param_vec[8]:.1f}/{param_vec[9]:.1f} | M2_el/az: {param_vec[10]:.1f}/{param_vec[11]:.1f}"
+    )
+    fig.text(0.5, 0.08, param_text, fontsize=10, ha="center", family="monospace")
+
+    fig.savefig(save_path, dpi=200)
+    plt.close(fig)
+
+
+
 
 def plot_real_param_and_generated(
     x_real,
@@ -175,6 +226,8 @@ def plot_real_param_and_generated(
     plt.tight_layout()
     plt.savefig(save_path)
     plt.close()
+
+
  
 #  def angles_from_dat(file_name):
 #     """
@@ -220,22 +273,24 @@ def main():
     ccd_folder = config['data_ccd_folder']
     image_shape = tuple(config['generation_image_shape'])
     background_path = config['data_background_path']
-    full_dataset = TESSDataset(angle_path=angle_path, 
-                               ccd_folder=ccd_folder, 
-                               image_shape=image_shape, 
-                               background_path=background_path, 
-                               patch_size=config['data_patch_size'], 
-                               repeat_factor=config['data_repeat_factor'],
-                               camera_number=config['data_camera_number'],
-                               mean=MEAN,
-                               std=STD,
-                               )
+    # full_dataset = TESSDataset(angle_path=angle_path, 
+    #                            ccd_folder=ccd_folder, 
+    #                            image_shape=image_shape, 
+    #                            background_path=background_path, 
+    #                            patch_size=config['data_patch_size'], 
+    #                            repeat_factor=config['data_repeat_factor'],
+    #                            camera_number=config['data_camera_number'],
+    #                            mean=MEAN,
+    #                            std=STD,
+    #                            )
+
+    full_dataset = TESSDataset_angles_only(angle_path=angle_path)
     # with open('/pdo/users/djtufto/cam2/orbit94.txt', 'r') as f:
     #     use_set = set(line.strip()[18:26] for line in f)
     # print(use_set)
     # print(len(use_set))
-    
-    orbitidx = sorted([idx for idx, ffi in enumerate(full_dataset.ffi_nums) if int(full_dataset.angles_dic[ffi]["orbit"]) in config['generation_orbit_range'] and str(ffi) in use_set], key=lambda x: int(full_dataset.ffi_nums[x]))
+    # orbitidx = sorted([idx for idx, ffi in enumerate(full_dataset.ffi_nums) if int(full_dataset.angles_dic[ffi]["orbit"]) in config['generation_orbit_range']], key=lambda x: int(full_dataset.ffi_nums[x]))
+    orbitidx = list(range(len(full_dataset)))
     print(len(orbitidx))
     # orbitidx = sorted(orbitidx, key=lambda x: int(full_dataset.ffi_nums[x]))
     test_dataset = Subset(full_dataset, orbitidx)
@@ -256,10 +311,10 @@ def main():
 
     for batch_idx, batch in tqdm(enumerate(dataloader), total=len(dataloader)):
         params_test = batch['x'].to(device)
-        x_real_test = batch['y'].to(device)
+        # x_real_test = batch['y'].to(device)
         batched_ffis = batch['ffi_num']
-        batched_file_names = batch['file_name']
-        batched_orbits = batch.get('orbit')
+        # batched_file_names = batch['file_name']
+        # batched_orbits = batch.get('orbit')
 
         with torch.no_grad():
             x_gen, x_gen_intermediate, timesteps = model.simulate(
@@ -274,7 +329,7 @@ def main():
                 epsilon=config['model_epsilon']
             )
 
-        batch_size = x_real_test.shape[0]
+        batch_size = params_test.shape[0]
         n_sample = config['generation_n_sample']
         timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
 
@@ -285,97 +340,6 @@ def main():
             n_saved, batch_size, n_sample, *x_gen_intermediate.shape[2:]
         )
 
-    #     images_gen = x_gen
-
-    #     # --- Filter and Collect ---
-    #     for idx in range(images_gen.shape[0]):
-    #         ffi = batched_ffis[idx]
-    #         orbit = angle_dict[ffi]['orbit']
-            
-    #         if str(orbit) == target_orbit:
-               
-    #             small_gen_img = images_gen[idx].squeeze(0)
-                
-    #             orbit_frames.append({
-    #                 'gen_img': small_gen_img.cpu().numpy(), # (C, H, W)
-    #                 'ffi': ffi,
-    #                 'orbit': orbit,
-    #                 'data' : params_test[idx].cpu().numpy(),
-    #                 'reference_image': x_real_test[idx].cpu().numpy(),
-    #             })
-
-    # # 3. Create the GIF (After the loop finishes)
-    # if not orbit_frames:
-    #     print(f"No images found for Orbit {target_orbit} in the entire dataset.")
-    # else:
-    #     print(f"Collected {len(orbit_frames)} frames. Rendering GIF...")
-
-    #     # Setup Figure
-    #     fig, axes = plt.subplots(1, 2, figsize=(15, 6))
-    #     plt.subplots_adjust(bottom=0.2)
-    #     fig.suptitle(f"Orbit {target_orbit}", fontsize=16, fontweight='bold')
-        
-    #     for ax in axes: ax.axis('off')
-
-    #     # Placeholders
-    #     im_real = axes[0].imshow(np.zeros((256,256)), cmap='viridis', origin='upper', interpolation='nearest', vmin=0, vmax=1)
-    #     axes[0].set_title("Preprocessed FFI")
-        
-    #     im_gen = axes[1].imshow(np.zeros((256,256)), cmap='viridis', origin='upper', interpolation='nearest', vmin=0, vmax=1)
-    #     axes[1].set_title(f"Generated Light")
-        
-
-    #     info_text = fig.text(0.5, 0.02, "", ha='center', fontsize=10, family='monospace', weight='normal')
-
-    #     def update(frame_idx):
-    #         try:
-    #             # Extract stored data
-    #             frame_data = orbit_frames[frame_idx]
-    #             ffi = frame_data['ffi']
-    #             orbit = frame_data['orbit']
-    #             data = frame_data['data']
-    #             reference_image = frame_data['reference_image'].squeeze(0)
-
-    #             small_gen_img = frame_data['gen_img'].squeeze(0)
-    #             im_real.set_data(reference_image*STD + MEAN)
-    #             im_real.set_extent([0, reference_image.shape[0], 0, reference_image.shape[1]])
-
-    #             im_gen.set_data(small_gen_img*STD + MEAN)
-    #             im_gen.set_extent([0, small_gen_img.shape[0], 0, small_gen_img.shape[1]])
-
-    #             v = data.squeeze(0)
-
-    #             # Update Text
-    #             # Format the text string (Split into lines for readability)
-    #             # Row 1: Distances
-    #             row1 = f"1/ED: {v[0]:.3f} | 1/MD: {v[1]:.3f} | 1/ED²: {v[2]:.3f} | 1/MD²: {v[3]:.3f}"
-    #             # Row 2: Global Angles
-    #             row2 = f"E_el/az: {v[4]:.1f}/{v[5]:.1f} | M_el/az: {v[6]:.1f}/{v[7]:.1f}"
-    #             # Row 3: Camera Specific Angles
-    #             row3 = f"E3_el/az: {v[8]:.1f}/{v[9]:.1f} | M3_el/az: {v[10]:.1f}/{v[11]:.1f}"
-                
-    #             text_str = (f"FFI: {ffi}\n"
-    #                         f"{row1}\n{row2}\n{row3}")
-                
-    #             info_text.set_text(text_str)
-
-    #             return [im_real, im_gen, info_text]
-    #         except Exception as e:
-    #             # THIS IS THE IMPORTANT PART
-    #             print(f"\nCRITICAL ERROR in frame {frame_idx}:")
-    #             print(f"Error Type: {type(e).__name__}")
-    #             print(f"Error Message: {e}")
-    #             raise e
-
-    #     ani = FuncAnimation(fig, update, frames=len(orbit_frames), interval=200)
-        
-    #     save_name = f'orbit_{target_orbit}.gif'
-    #     ani.save(save_name, writer=PillowWriter(fps=5), dpi=700)
-        
-    #     plt.close(fig)
-    #     print(f"Successfully saved {save_name}")
-
-
         
         print(f"Saving generated images... {batch_idx}/{len(dataloader)}")
         for item_idx in range(batch_size):
@@ -385,62 +349,26 @@ def main():
                 f"{batched_ffis[item_idx]}_{timestamp}"
             )
 
-            # # Average RMSE between generated and real images for this orbit entry
-            # recon_image = x_gen[item_idx].mean(dim=0)
-            # rmse_value = torch.sqrt(F.mse_loss(recon_image, x_real_test[item_idx])).item()
-            # if batched_orbits is not None:
-            #     orbit_value = batched_orbits[item_idx]
-            #     orbit_number = int(orbit_value) if not isinstance(orbit_value, (int, str)) else int(orbit_value)
-            #     rmse_per_orbit[orbit_number].append(rmse_value)
-
-            plot_real_param_and_generated(
-                x_real_test[item_idx],
-                param_vec,
+            # plot_real_param_and_generated(
+            #     x_real_test[item_idx],
+            #     param_vec,
+            #     x_gen[item_idx],
+            #     f"{save_prefix}.png",
+            #     title="test",
+            #     MEAN=MEAN,
+            #     STD=STD,
+            #     orbit=batched_orbits[item_idx] if batched_orbits is not None else None,
+            #     ffi=batched_ffis[item_idx],
+            # )
+            plot_generated(
                 x_gen[item_idx],
+                param_vec,
                 f"{save_prefix}.png",
-                title="test",
                 MEAN=MEAN,
                 STD=STD,
-                orbit=batched_orbits[item_idx] if batched_orbits is not None else None,
                 ffi=batched_ffis[item_idx],
             )
 
-            # # Save intermediate trajectory for the first generated sample of this item
-            # intermediate_item = x_gen_intermediate[:, item_idx, 0]  # (num_save, 1, H, W)
-            # fig, axes = plt.subplots(1, intermediate_item.shape[0], figsize=(3 * intermediate_item.shape[0], 3))
-            # for j in range(intermediate_item.shape[0]):
-            #     timestep = timesteps[j]
-            #     axes[j].imshow(intermediate_item[j][0], cmap='viridis', vmin=0, vmax=1)
-            #     axes[j].set_title(f"t={timestep}")
-            #     axes[j].axis('off')
-            # plt.tight_layout()
-            # plt.savefig(f"{save_prefix}_intermediate.png")
-
-    if rmse_per_orbit:
-        rmse_summary_lines = [
-            f"RMSE summary generated at {datetime.datetime.now().isoformat()}",
-            "----------------------------------------",
-        ]
-        total_rmse = 0.0
-        total_count = 0
-        for orbit_num in sorted(rmse_per_orbit.keys()):
-            orbit_values = rmse_per_orbit[orbit_num]
-            avg_rmse = sum(orbit_values) / len(orbit_values)
-            rmse_summary_lines.append(f"Orbit {orbit_num}: avg RMSE = {avg_rmse:.6f} over {len(orbit_values)} FFIs")
-            total_rmse += sum(orbit_values)
-            total_count += len(orbit_values)
-        if total_count > 0:
-            overall_avg = total_rmse / total_count
-            rmse_summary_lines.append("----------------------------------------")
-            rmse_summary_lines.append(f"Overall avg RMSE: {overall_avg:.6f} across {total_count} FFIs")
-
-        rmse_summary_path = os.path.join(
-            config['generation_output_dir'],
-            f"rmse_summary_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-        )
-        with open(rmse_summary_path, 'w') as rmse_file:
-            rmse_file.write("\n".join(rmse_summary_lines) + "\n")
-        print(f"Saved RMSE summary to {rmse_summary_path}")
 
 
 # def main_posterior_sde():

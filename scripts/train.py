@@ -123,8 +123,8 @@ def create_callbacks(config, args, rank):
                 log_model_freq=config.get('wandb_log_model_freq', 20),
                 use_wandb=True,
                 mode=args.wandb,
-                mean=config.get('data_mean', 0.01978608595999928),
-                std=config.get('data_std', 0.08876927679677006)
+                MEAN=config.get('data_mean', 0.01978608595999928),
+                STD=config.get('data_std', 0.08876927679677006)
             )
             callbacks.append(wandb_callback)
     

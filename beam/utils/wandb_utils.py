@@ -134,8 +134,8 @@ def log_sample_images(
     step: int = None,
     name: str = "Training Set",  # "Training" or "Validation"
     ema: Optional[EMA] = None,
-    mean: float = 0.01978608595999928,
-    std: float = 0.08876927679677006,
+    MEAN: float = 0.01978608595999928,
+    STD: float = 0.08876927679677006,
 ) -> None:
     """
     Generate samples and log them to W&B with original and generated images side by side.
@@ -153,8 +153,8 @@ def log_sample_images(
         mean: Mean of the data
         std: Standard deviation of the data
     """
-    MEAN = mean
-    STD = std
+    MEAN = MEAN
+    STD = STD
     if ema is not None:
         ema.store(model)
         ema.copy_to(model)

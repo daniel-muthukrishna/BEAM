@@ -43,8 +43,8 @@ class WeightsAndBiasesCallback(Callback):
         log_model_freq: int = 20,
         use_wandb: bool = True,
         mode: str = "online",
-        mean: float = 0.01978608595999928,
-        std: float = 0.08876927679677006,
+        MEAN: float = 0.01978608595999928,
+        STD: float = 0.08876927679677006,
     ):
         super().__init__()
         self.project_name = project_name
@@ -56,6 +56,9 @@ class WeightsAndBiasesCallback(Callback):
         self.mode = mode if use_wandb else "disabled"
         self.batch_count = 0
         self.current_step = 0  # Track the current step for consistent logging
+        self.MEAN = MEAN
+        self.STD = STD
+        
         
     def on_train_begin(self, trainer: Any) -> None:
         """Initialize W&B at the start of training."""
@@ -149,8 +152,8 @@ class WeightsAndBiasesCallback(Callback):
                     step=self.current_step,
                     name="Training Set",
                     ema=trainer.ema,
-                    mean=self.mean,
-                    std=self.std
+                    MEAN=self.MEAN,
+                    STD=self.STD
                 )
                 
                 # Log validation samples
@@ -164,8 +167,8 @@ class WeightsAndBiasesCallback(Callback):
                     step=self.current_step,
                     name="Validation Set",
                     ema=trainer.ema,
-                    mean=self.mean,
-                    std=self.std
+                    MEAN=self.MEAN,
+                    STD=self.STD
                 )
             except Exception as e:
                 print(f"Warning: Failed to log sample images to W&B: {e}")

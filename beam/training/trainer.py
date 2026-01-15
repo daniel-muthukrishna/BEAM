@@ -479,6 +479,9 @@ class SMTrainer:
         """
         # Set number of epochs
         n_epoch = n_epoch or self.config['training_n_epoch']
+
+        if self.config['load_checkpoint']:
+            self.load_checkpoint(self.config['load_checkpoint'])
         
         # Initialize timing
         self.start_training_time = time.time()
