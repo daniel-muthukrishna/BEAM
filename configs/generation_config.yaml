@@ -1,7 +1,7 @@
 model:
   n_feat: 128            # Number of features in U-Net
   epsilon: 0.0001          # Bound t for stability
-  architecture: "flow"   # Architecture to use for the model
+  architecture: "noise"   # Architecture to use for the model
   channel_mults: [1,1,2,2,2]
   heads_at: [2,3,4]
   num_res: 2

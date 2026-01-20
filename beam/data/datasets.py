@@ -2,7 +2,7 @@
 Dataset classes for TESS image data.
 
 This module contains dataset implementations for loading and processing
-TESS (Transiting Exoplanet Survey Satellite) image data.
+TESS (Transiting Exoplanet Survey Satellite) image data.  
 """
 
 import os
@@ -61,11 +61,11 @@ class TESSDataset(Dataset):
         ccd_folder: str,
         background_path: str,
         image_shape: Tuple[int, int],
+        mean: float,
+        std: float,
         patch_size: Optional[Tuple[int, int]] = None,
         repeat_factor: int = 1,
         camera_number: str = '3',
-        mean: float = 0.01978608595999928,
-        std: float = 0.08876927679677006,
     ):
         start_time = time.time()
         # Define paths and parameters
@@ -123,22 +123,22 @@ class TESSDataset(Dataset):
 
         self._cache = None
 
-        with open(f'/pdo/users/djtufto/cam{self.camera_number}/skip.txt', 'r') as f:
-            skip_set = set(line.strip() for line in f)
+        # with open(f'/pdo/users/djtufto/cam{self.camera_number}/skip.txt', 'r') as f:
+        #     skip_set = set(line.strip() for line in f)
         
         self.skip_count = 0
         # Load all files in the ccd_folder that have corresponding angle data 
         for filename in os.listdir(self.ccd_folder):
             ffi_num = filename[18:18+8]
             if ffi_num in self.angles_dic.keys():
-                if filename in skip_set:
-                    self.skip_count += 1
-                    continue
-                orbit = self.angles_dic[ffi_num]["orbit"]
-                self.files.append(filename)
-                self.ffi_nums.append(ffi_num)
-                self.length += 1
-        print(f"Skipped {self.skip_count} files")
+                # if filename in skip_set:
+                #     self.skip_count += 1
+                #     continue
+                if self.angles_dic[ffi_num]["below_sunshade"] == True:
+                    orbit = self.angles_dic[ffi_num]["orbit"]
+                    self.files.append(filename)
+                    self.ffi_nums.append(ffi_num)
+                    self.length += 1
         # Convert to tuples to prevent reordering
         self.files = tuple(self.files)
         self.ffi_nums = tuple(self.ffi_nums)
@@ -191,7 +191,15 @@ class TESSDataset(Dataset):
             angles['M' + self.camera_number + 'el'], angles['M' + self.camera_number + 'az']
         ])
         
-        image_arr = pickle.load(open(file_path, "rb"))
+        image_arr = pickle.load(open(file_path, "rb")) if self.patch_size is None else np.load(file_path, mmap_mode='r')
+ 
+        if self.patch_size is not None:
+            patch_idx = torch.randint(self.num_patches, (1,))
+            patch_row, patch_col = divmod(patch_idx.item(), self.patch_x)
+            top, left = patch_row*self.ph, patch_col*self.pw
+            image_arr = image_arr[top:top+self.ph, left:left+self.pw]
+            conditioning_loc = torch.cat([self.row_embeds[patch_row], self.col_embeds[patch_col]], dim=-1).unsqueeze(0)
+
         ffi_image = Image.fromarray(image_arr.flatten())
         angles_image = Image.fromarray(params)
         # Define transformations
@@ -201,7 +209,7 @@ class TESSDataset(Dataset):
         ])
         target_transform = transforms.Compose([
             lambda s: np.array(s),
-            lambda s: s.reshape(self.image_shape),  # Reshape to the target image size
+            lambda s: s.reshape(self.image_shape if self.patch_size is None else self.patch_size),  # Reshape to the target image size
             transforms.ToTensor(),
             transforms.Normalize(mean=self.MEAN, std=self.STD)
         ])
@@ -211,15 +219,16 @@ class TESSDataset(Dataset):
         angles_image = transform(angles_image)
         ffi_image = target_transform(ffi_image)
 
-        if 60 < int(orbit) < 116:
-            ffi_image = ffi_image*3 # Shorter Cadence in EM1
+        # angles_image = torch.zeros_like(angles_image)
+        # angles_image = torch.cat([angles_image, conditioning_loc], dim=-1)
         return {
             "x": angles_image,       # Orbital parameters (1×12 vector)
             "y": ffi_image,          # Image (64×64 or other size)
             "ffi_num": ffi_num,      # FFI identification number
             "orbit": orbit, # Orbit number
-            "file_name": file_name, # File name
             }
+
+
 class TESSDataset_angles_only(Dataset):
     """
     Dataset for TESS (Transiting Exoplanet Survey Satellite) orbital parameters only.
@@ -282,7 +291,7 @@ def embed_patch(prow, embed_dim):
 
 
 
-def create_train_valid_datasets_by_orbit(dataset: TESSDataset, orbit_threshold: int = 90, max_orbit: int = 100):
+def create_train_valid_datasets_by_orbit(dataset: TESSDataset, orbit_threshold: int = 47, max_orbit: int = 100):
     """
     Create training and validation datasets from a TESSDataset using orbit number as the split criterion.
     Orbits <= orbit_threshold go to training, orbits > orbit_threshold go to validation.
@@ -365,6 +374,4 @@ class TESS_4096_processed_images(Dataset):
     def __getitem__(self, ffi_num: str) -> torch.Tensor:
         with open(self.ffi_to_pkl_filepath[ffi_num], 'rb') as file:
             return pickle.load(file)
-
-
 

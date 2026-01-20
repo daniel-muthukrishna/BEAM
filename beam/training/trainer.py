@@ -143,9 +143,9 @@ class SMTrainer:
         valid_loader = DataLoader(
             self.valid_dataset, 
             batch_size=self.config['training_batch_size'], 
-            pin_memory=True,
-            num_workers=2, 
-            persistent_workers=True,
+            # pin_memory=True,
+            # num_workers=0, 
+            # persistent_workers=True,
             drop_last=True, 
             sampler=valid_sampler,
             shuffle=False
