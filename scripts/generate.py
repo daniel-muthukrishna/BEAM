@@ -8,24 +8,19 @@ import os
 import pickle
 import argparse
 import datetime
-from collections import defaultdict
+
 import numpy as np
 import torch
 import matplotlib
-matplotlib.use('Agg') 
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation, PillowWriter
-from beam.models.simulator import ODEIntegrator, EulerMaruyama, PosteriorSDE
-
+from beam.models.simulator import PosteriorSDE
 from beam.models.unet import ContextUnet
 from beam.models.probabilitypath import GaussianProbabilityPath, OTAlpha, OTBeta, VPBeta
 from beam.models.interpolant import ScoreMatch, EMA
 from beam.utils.config import load_config, flatten_config
-from beam.utils.visualization import plot_samples   
 from beam.data.datasets import TESSDataset, create_train_valid_datasets_by_orbit, TESSDataset_angles_only
-from torch.utils.data import DataLoader, Subset
-from tqdm import tqdm
-import torch.nn.functional as F
+from torch.utils.data import DataLoader
 
 
 def parse_args():
@@ -49,7 +44,8 @@ def load_model(model_path, config, device, train_loader, context_len=None):
     Returns:
         Loaded DDPM model
     """
-    # Create model architecture
+    # Build the same U-Net shape used during training so checkpoint weights load cleanly.
+    # We infer the default conditioning length from one training batch unless overridden.
     batch = next(iter(train_loader))
     unet = ContextUnet(
         in_feats=1, 
@@ -62,7 +58,8 @@ def load_model(model_path, config, device, train_loader, context_len=None):
         context_dim=64,
     )
     
-    # Create model
+    # Wrap the U-Net in the training/sampling helper that knows how to interpret
+    # the network output (flow / score / v-parameterization depending on config).
     model = ScoreMatch(
         nn_model=unet, 
         probability_path=GaussianProbabilityPath(
@@ -85,84 +82,13 @@ def load_model(model_path, config, device, train_loader, context_len=None):
         model.load_state_dict(checkpoint['model_state_dict'])
 
 
-    # Load EMA weights
+    # Sampling usually uses the EMA-smoothed weights instead of raw training weights.
     if config['generation_ema']:
         ema.load_state_dict(checkpoint['ema_state_dict'])
         ema.copy_to(model.nn_model)
   
     print(f"Loaded model from {model_path}")
     return model
-
-def load_params(params_file, n_samples=5):
-    """
-    Load orbital parameters from file.
-    
-    Args:
-        params_file: Path to orbital parameters file
-        n_samples: Number of random parameters to use if file not provided
-        
-    Returns:
-        Tensor of parameters
-    """
-    if params_file and os.path.exists(params_file):
-        with open(params_file, 'rb') as f:
-            params = pickle.load(f)
-            return torch.tensor(params, dtype=torch.float32)
-    else:
-        # Generate random parameters for testing
-        print(f"No parameters file found, using {n_samples} random parameters")
-        return torch.rand((n_samples, 1, 12))
-
-import numpy as np
-import matplotlib.pyplot as plt
-
-def plot_generated(x_gen, param_vec, save_path, MEAN, STD, ffi=None):
-    if len(x_gen.shape) == 3:
-        x_gen = x_gen.unsqueeze(1)
-
-    n_sample = x_gen.shape[0]
-    ncols = n_sample
-
-    fig, axes = plt.subplots(1, ncols, figsize=(max(3 * ncols, 5), 4))
-    axes = np.atleast_1d(axes).ravel()
-
-    normval = 633118.0 / 1800.0
-    fig.subplots_adjust(left=0.12, right=0.84, top=0.85, bottom=0.28)  
-
-    
-    if ffi is not None:
-        fig.suptitle(f"FFI {ffi}", fontsize=14)
-
-    ims = []
-    for j in range(n_sample):
-        im = axes[j].imshow(
-            (x_gen[j, 0].cpu().numpy() * STD + MEAN) * normval,
-            cmap="viridis",
-            vmin=0, vmax=normval, extent=[0, 4096, 0, 4096]
-        )
-        ims.append(im)
-        axes[j].set_title(f"Generated Light {j+1}")
-
-    cbar = fig.colorbar(ims[0], ax=axes, fraction=0.03, pad=0.02, label= 'counts/s')
-    cbar.ax.tick_params(labelsize=9)
-
-    pos = axes[0].get_position()
-    dx = 0.05  
-    axes[0].set_position([pos.x0 - dx, pos.y0, pos.width, pos.height])
-    cpos = cbar.ax.get_position()
-    cbar.ax.set_position([cpos.x0 - dx, cpos.y0, cpos.width, cpos.height])
-
-    param_text = (
-        f"1/ED: {param_vec[0]:.3f} | 1/MD: {param_vec[1]:.3f} | 1/ED²: {param_vec[2]:.3f} | 1/MD²: {param_vec[3]:.3f}\n"
-        f"E_el/az: {param_vec[4]:.1f}/{param_vec[5]:.1f} | M_el/az: {param_vec[6]:.1f}/{param_vec[7]:.1f}\n"
-        f"E2_el/az: {param_vec[8]:.1f}/{param_vec[9]:.1f} | M2_el/az: {param_vec[10]:.1f}/{param_vec[11]:.1f}"
-    )
-    fig.text(0.5, 0.08, param_text, fontsize=10, ha="center", family="monospace")
-
-    fig.savefig(save_path, dpi=200)
-    plt.close(fig)
-
-
 
 
 def plot_real_param_and_generated(
@@ -228,346 +154,232 @@ def plot_real_param_and_generated(
     plt.close()
 
 
- 
-#  def angles_from_dat(file_name):
-#     """
-#     Load angles from data file.
-#     """
-#     with open(file_name, 'r') as f:
-#         for line in f:
-#             line = line.strip()
-#             line = line.split()
-
-
-def main():
+def main_posterior_sde():
+    # This is the active generation entrypoint.
+    # It runs a posterior-guided sampling demo:
+    #   1) warm up a low-res light image with the light prior model
+    #   2) apply posterior score corrections using both light + star models
     # Parse arguments
     args = parse_args()
-    
+
     # Load configuration
     config = load_config(args.config)
     config = flatten_config(config)
-    
+
+    # `flatten_config` converts nested yaml keys like `generation.output_dir`
+    # into flat keys like `generation_output_dir`.
     # Create output directory
     os.makedirs(config['generation_output_dir'], exist_ok=True)
-    
+
     # Set device
     device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    
-    # Load model
- 
-    # MEAN = 0.65187982
-    # STD =  1.10163832
-    # MEAN = 0.1154092
-    # STD =  0.2346011
-    # MEAN = 0.1099859
-    # STD =  0.8313040
-    MEAN = config['data_mean']
-    STD = config['data_std']
 
-    # Load parameters
+    # Normalization constants for the two image domains used in the posterior:
+    # - LIGHT: low-res diffuse/background light model domain (256x256)
+    # - STAR: full-res residual/star model domain (4096x4096 tiles)
+    LIGHTMEAN = config['generation_light_mean']
+    LIGHTSTD = config['generation_light_std']
+    STARMEAN = config['generation_star_mean']
+    STARSTD = config['generation_star_std']
 
 
-    # Load dataset for real images
+    loader_batch_size = config.get('generation_batch_size', 1)
+
+    # Build a loader so `load_model(...)` can infer the conditioning shape from a batch.
+    # The posterior demo below does not sample from this loader directly.
     angle_path = config['data_angle_path']
     ccd_folder = config['data_ccd_folder']
-    image_shape = tuple(config['generation_image_shape'])
-    background_path = config['data_background_path']
-    # full_dataset = TESSDataset(angle_path=angle_path, 
-    #                            ccd_folder=ccd_folder, 
-    #                            image_shape=image_shape, 
-    #                            background_path=background_path, 
-    #                            patch_size=config['data_patch_size'], 
-    #                            repeat_factor=config['data_repeat_factor'],
-    #                            camera_number=config['data_camera_number'],
-    #                            mean=MEAN,
-    #                            std=STD,
-    #                            )
+    camera_number = config['data_camera_number']
+    background_path = config.get('data_background_path')
 
-    full_dataset = TESSDataset_angles_only(angle_path=angle_path)
-    # with open('/pdo/users/djtufto/cam2/orbit94.txt', 'r') as f:
-    #     use_set = set(line.strip()[18:26] for line in f)
-    # print(use_set)
-    # print(len(use_set))
-    # orbitidx = sorted([idx for idx, ffi in enumerate(full_dataset.ffi_nums) if int(full_dataset.angles_dic[ffi]["orbit"]) in config['generation_orbit_range']], key=lambda x: int(full_dataset.ffi_nums[x]))
-    orbitidx = list(range(len(full_dataset)))
-    print(len(orbitidx))
-    # orbitidx = sorted(orbitidx, key=lambda x: int(full_dataset.ffi_nums[x]))
-    test_dataset = Subset(full_dataset, orbitidx)
-    dataloader = DataLoader(test_dataset, batch_size=config['generation_batch_size'], shuffle=False)
-  
-    model = load_model(config['generation_model_path'], config, device, dataloader)
-    model.eval()
-
-    # print("Generating test set with length ", len(dataloader))
-
-    # orbit_frames = []
-    # real_path = '/pdo/users/jlupoiii/TESS/data/processed_images_im4096x4096/'
-    # bg_path = '/pdo/users/jlupoiii/TESS/data/background_avg_ccds_im4096x4096/'
-    # angle_dict = pickle.load(open(config['data_angle_path'], 'rb'))
-    # target_orbit = '43'
-
-    rmse_per_orbit = defaultdict(list)
-
-    for batch_idx, batch in tqdm(enumerate(dataloader), total=len(dataloader)):
-        params_test = batch['x'].to(device)
-        # x_real_test = batch['y'].to(device)
-        batched_ffis = batch['ffi_num']
-        # batched_file_names = batch['file_name']
-        # batched_orbits = batch.get('orbit')
-
-        with torch.no_grad():
-            x_gen, x_gen_intermediate, timesteps = model.simulate(
-                c_i=params_test,
-                n_sample=config['generation_n_sample'],
-                size=image_shape,
-                device=device,
-                simulator=ODEIntegrator if config['model_architecture'] == "flow" else EulerMaruyama,
-                guidance_scale=config['generation_guidance_scale'],
-                num_save=config['generation_num_timesteps'],
-                num_steps=400,
-                epsilon=config['model_epsilon']
-            )
-
-        batch_size = params_test.shape[0]
-        n_sample = config['generation_n_sample']
-        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-
-        # Reshape outputs back to (batch, n_sample, ...)
-        x_gen = x_gen.view(batch_size, n_sample, *x_gen.shape[1:])
-        n_saved = x_gen_intermediate.shape[0]
-        x_gen_intermediate = x_gen_intermediate.reshape(
-            n_saved, batch_size, n_sample, *x_gen_intermediate.shape[2:]
+    if background_path is None:
+        shape_dataset = TESSDataset_angles_only(
+            angle_path=angle_path,
+            camera_number=camera_number,
         )
+        train_loader = DataLoader(shape_dataset, batch_size=loader_batch_size, shuffle=True)
+    else:
+        image_shape = tuple(config['data_image_shape'])
+        full_dataset = TESSDataset(
+            angle_path=angle_path,
+            ccd_folder=ccd_folder,
+            image_shape=image_shape,
+            background_path=background_path,
+            patch_size=config['data_patch_size'],
+            repeat_factor=config['data_repeat_factor'],
+            camera_number=camera_number,
+            mean=config['data_mean'],
+            std=config['data_std'],
+        )
+        train_dataset, _ = create_train_valid_datasets_by_orbit(full_dataset)
+        train_loader = DataLoader(train_dataset, batch_size=loader_batch_size, shuffle=True)
 
-        
-        print(f"Saving generated images... {batch_idx}/{len(dataloader)}")
-        for item_idx in range(batch_size):
-            param_vec = params_test[item_idx].squeeze(0)  # [12]
-            save_prefix = os.path.join(
-                config['generation_output_dir'],
-                f"{batched_ffis[item_idx]}_{timestamp}"
-            )
+    # Load two checkpoints:
+    # - `light_model`: predicts the low-res light/background component conditioned on 12 angles.
+    # - `star_model`: predicts score/v on full-res residual tiles (used tile-wise on x_obs - U(y)).
+    #
+    # We pass the raw U-Nets into PosteriorSDE. That class handles CFG and converts the
+    # v-parameterized outputs into scores/vector fields internally.
+    star_model = load_model(config['generation_model_path_star'], config, device, train_loader, context_len=24)
+    light_model = load_model(config['generation_model_path'], config, device, train_loader)
+    star_unet = star_model.nn_model.to(device).eval()
+    light_unet = light_model.nn_model.to(device).eval()
 
-            # plot_real_param_and_generated(
-            #     x_real_test[item_idx],
-            #     param_vec,
-            #     x_gen[item_idx],
-            #     f"{save_prefix}.png",
-            #     title="test",
-            #     MEAN=MEAN,
-            #     STD=STD,
-            #     orbit=batched_orbits[item_idx] if batched_orbits is not None else None,
-            #     ffi=batched_ffis[item_idx],
-            # )
-            plot_generated(
-                x_gen[item_idx],
-                param_vec,
-                f"{save_prefix}.png",
-                MEAN=MEAN,
-                STD=STD,
-                ffi=batched_ffis[item_idx],
-            )
+    # Demo path: pick one observed frame and recover a low-res light image `y` such that
+    # x_obs ~= U(y) + residual, where U is bilinear upsampling to full resolution.
+    obs_file =  'tess2018305145302-00009383-3-crm-ffi_dehoc_processed_im4096x4096.pkl.npy'
+    light_file =  'tess2018305145302-00009383-3-crm-ffi_dehoc_processed_im256x256.pkl'
 
+    x_obs = np.load("/pdo/users/djtufto/data/data_tess_4096_full/" + obs_file, mmap_mode="r")
+    # The preprocessed low-res file is loaded here for inspection/debug parity, but the
+    # sampler below starts from noise and does not directly initialize from this file.
+    with open("/pdo/users/jlupoiii/TESS/data/processed_images_im256x256/" + light_file, "rb") as f:
+        preprocessed_image = pickle.load(f)
+    x_obs = torch.tensor(x_obs, dtype=torch.float32).to(device).view(1, 1, 4096, 4096)
+    ffis = obs_file[18:26]
 
-
-# def main_posterior_sde():
-#     # Parse arguments
-#     args = parse_args()
-
-#     # Load configuration
-#     config = load_config(args.config)
-#     config = flatten_config(config)
-
-#     # Create output directory
-#     os.makedirs(config['generation_output_dir'], exist_ok=True)
-
-#     # Set device
-#     device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
-#     print(f"Using device: {device}")
-
-#     # Normalisation constants
-#     LIGHTMEAN = 0.01978608595999928
-#     LIGHTSTD = 0.08876927679677006
-#     STARMEAN = 0.08837062429384838 
-#     STARSTD =  0.8176902707359797
-
-
-#     # Load parameters (currently unused but retained for parity with main())
-#     params = load_params(config['generation_params_file'], config['generation_n_datapoint']).to(device)
-
-#     # Load dataset for real images
-#     angle_path = config['data_angle_path']
-#     ccd_folder = config['data_ccd_folder']
-#     image_shape = tuple(config['generation_image_shape'])
-#     background_path = config['data_background_path']
-#     full_dataset = TESSDataset(
-#         angle_path=angle_path,
-#         ccd_folder=ccd_folder,
-#         image_shape=image_shape,
-#         background_path=background_path,
-#         patch_size=config['data_patch_size'],
-#         repeat_factor=config['data_repeat_factor'],
-#     )
-#     train_dataset, valid_dataset = create_train_valid_datasets_by_orbit(full_dataset)
-#     train_loader = DataLoader(train_dataset, batch_size=config['generation_n_datapoint'], shuffle=True)
-#     valid_loader = DataLoader(valid_dataset, batch_size=config['generation_n_datapoint'], shuffle=True)
-
-#     # Load models and extract the underlying UNets used for scoring
-#     star_model = load_model(config['generation_model_path_star'], config, device, train_loader, context_len=24)
-#     light_model = load_model(config['generation_model_path'], config, device, train_loader)
-#     star_unet = star_model.nn_model.to(device).eval()
-#     light_unet = light_model.nn_model.to(device).eval()
-
-#     # Choose a representative batch
-#     # train_batch = None
-#     # for batch in train_loader:
-#     #     if batch['y'].mean() > 0.3:
-#     #         train_batch = batch
-#     #         break
-#     # if train_batch is None:
-#     #     train_batch = next(iter(train_loader))
-
-#     # obs_files = sorted(os.listdir("/pdo/users/djtufto/data/data_tess_4096_full/"))
-#     # light_files = sorted(os.listdir("/pdo/users/jlupoiii/TESS/data/processed_images_im256x256/"))
-#     # rdx = random.randint(0, len(obs_files)-1)
-#     # obs_file = obs_files[rdx]
-#     # light_file =  obs_file[:-17] + '256x256.pkl'
-#     obs_file =  'tess2018305145302-00009383-3-crm-ffi_dehoc_processed_im4096x4096.pkl.npy'
-#     light_file =  'tess2018305145302-00009383-3-crm-ffi_dehoc_processed_im256x256.pkl'
-
-#     x_obs = np.load("/pdo/users/djtufto/data/data_tess_4096_full/" + obs_file, mmap_mode="r")
-#     with open("/pdo/users/jlupoiii/TESS/data/processed_images_im256x256/" + light_file, "rb") as f:
-#         preprocessed_image = pickle.load(f)
-#     x_obs = torch.tensor(x_obs, dtype=torch.float32).to(device).view(1, 1, 4096, 4096)
-#     y0 = torch.randn(1, 1, 256, 256).to(device)
-#     ffis = obs_file[18:26]
-
-#     with open(config['data_angle_path'], "rb") as f:
-#         angle_dict = pickle.load(f)
-#     ffis = obs_file[18:26]
-#     angles = angle_dict[ffis]
-#     params = np.array([
-#         angles['1/ED'], angles['1/MD'], 
-#         angles['1/ED^2'], angles['1/MD^2'], 
-#         angles['Eel'], angles['Eaz'], 
-#         angles['Mel'], angles['Maz'], 
-#         angles['E3el'], angles['E3az'], 
-#         angles['M3el'], angles['M3az']
-#     ])
-#     params = torch.tensor(params, dtype=torch.float32).to(device)
-#     c_obs = params.view(1, 1, 12)
+    # Look up the conditioning vector (12 orbital/geometry values) for this exact FFI.
+    with open(config['data_angle_path'], "rb") as f:
+        angle_dict = pickle.load(f)
+    angles = angle_dict[ffis]
+    # 12-D orbital/geometry conditioning vector expected by the light model.
+    params = np.array([
+        angles['1/ED'], angles['1/MD'], 
+        angles['1/ED^2'], angles['1/MD^2'], 
+        angles['Eel'], angles['Eaz'], 
+        angles['Mel'], angles['Maz'], 
+        angles['E3el'], angles['E3az'], 
+        angles['M3el'], angles['M3az']
+    ])
+    params = torch.tensor(params, dtype=torch.float32).to(device)
+    c_obs = params.view(1, 1, 12)
   
 
-#     B, C, H, W = x_obs.shape
-#     low_res_cfg = config.get('posterior_low_res_size', 256)
-#     low_res_size = int(low_res_cfg) if low_res_cfg is not None else 256
-#     low_res_size = min(low_res_size, H, W)
-#     if H % low_res_size != 0 or W % low_res_size != 0:
-#         raise ValueError(f"Image resolution {H}x{W} not divisible by low-res size {low_res_size}")
-#     upscale_factor = H // low_res_size
-#     stride = int(config.get('posterior_stride', low_res_size))
-#     t=torch.linspace(config['model_epsilon'], 1 - config['model_epsilon'], 100)
-#     t = t.unsqueeze(0).expand(1, 100).to(device)
-#     posterior = PosteriorSDE(
-#         star_score=star_unet,
-#         light_score=light_unet,
-#         t=t,
-#         sigma=VPBeta(),
-#         guidance_value=config['generation_guidance_scale'],
-#         x_obs=x_obs,
-#         num_save=config['generation_num_timesteps'],
-#         num_corrections=3,
-#         corr_step_size=0.01,
-#         upscale_factor=upscale_factor,
-#         stride=stride,
-#         tile_size=low_res_size,
-#     )
+    B, C, H, W = x_obs.shape
+    # PosteriorSDE evolves a low-res variable y (256x256 by default) and uses:
+    # - U(y): upsampled light estimate in observed-image space
+    # - UT(.): downprojection of full-res score terms back to low-res
+    low_res_cfg = config.get('posterior_low_res_size', 256)
+    low_res_size = int(low_res_cfg) if low_res_cfg is not None else 256
+    low_res_size = min(low_res_size, H, W)
+    if H % low_res_size != 0 or W % low_res_size != 0:
+        raise ValueError(f"Image resolution {H}x{W} not divisible by low-res size {low_res_size}")
+    upscale_factor = H // low_res_size
+    stride = int(config.get('posterior_stride', low_res_size))
+    # Time grid for the predictor/corrector dynamics (avoid exactly t=0 and t=1 for stability).
+    t=torch.linspace(config['model_epsilon'], 1 - config['model_epsilon'], 100)
+    t = t.unsqueeze(0).expand(1, 100).to(device)
+    # PosteriorSDE implements the hybrid sampler:
+    # - predictor phase: prior-driven warmup in low-res light space
+    # - correction phase: posterior Langevin-style refinement using light + star terms
+    posterior = PosteriorSDE(
+        star_score=star_unet,
+        light_score=light_unet,
+        t=t,
+        sigma=VPBeta(),
+        guidance_value=config['generation_guidance_scale'],
+        x_obs=x_obs,
+        num_save=config['generation_num_timesteps'],
+        num_corrections=3,
+        corr_step_size=0.01,
+        upscale_factor=upscale_factor,
+        stride=stride,
+        tile_size=low_res_size,
+    )
 
-#     y0 = torch.randn(1, 1, 256, 256).to(device)
-#     with torch.no_grad():
-#         y_low, timesteps = posterior.simulate(
-#             c=c_obs,
-#             y0=y0,
-#         )
-#     y_low = y_low*LIGHTSTD + LIGHTMEAN
-#     y_final = y_low[-1]
-#     light_full = posterior.U(y_final)
-#     reconstruction = x_obs - light_full
+    # Initialize low-res light image from Gaussian noise.
+    y0 = torch.randn(1, 1, 256, 256).to(device)
+    with torch.no_grad():
+        # Returns saved trajectory states (not just final sample) and corresponding saved times.
+        y_low, timesteps = posterior.simulate(
+            c=c_obs,
+            y0=y0,
+        )
+    # Convert the saved low-res trajectory back to image space for plotting.
+    y_low = y_low*LIGHTSTD + LIGHTMEAN
+    y_final = y_low[-1]
+    # Upsample final low-res light estimate back to observed-image resolution.
+    light_full = posterior.U(y_final)
+    # Residual (star-like/high-frequency component) implied by the recovered light image.
+    reconstruction = x_obs - light_full
 
-#     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-#     posterior_dir = os.path.join(config['generation_output_dir'], 'posterior_sde', timestamp)
-#     os.makedirs(posterior_dir, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    posterior_dir = os.path.join(config['generation_output_dir'], 'posterior_sde', timestamp)
+    os.makedirs(posterior_dir, exist_ok=True)
   
 
-#     for idx in range(B):
-#         observed = x_obs[idx].detach().cpu().numpy()[0]
-#         light_img = light_full[idx].detach().cpu().numpy()[0]
-#         star_img = reconstruction[idx].detach().cpu().numpy()[0]
+    # Save side-by-side diagnostics for the inferred decomposition x_obs ≈ light + residual.
+    for idx in range(B):
+        observed = x_obs[idx].detach().cpu().numpy()[0]
+        light_img = light_full[idx].detach().cpu().numpy()[0]
+        star_img = reconstruction[idx].detach().cpu().numpy()[0]
 
-#         entries = [
-#             ("Observed", observed, True),
-#             ("Light (U(y))", light_img, True),
-#             ("Star Residual", star_img, True),
-#         ]
+        entries = [
+            ("Observed", observed, True),
+            ("Light (U(y))", light_img, True),
+            ("Star Residual", star_img, True),
+        ]
 
-#         fig, axes = plt.subplots(1, len(entries), figsize=(3 * len(entries), 3))
-#         for ax, (title, img, clamp) in zip(np.atleast_1d(axes), entries):
-#             if clamp:
-#                 ax.imshow(img, cmap='viridis', vmin=0, vmax=1)
-#             else:
-#                 im = ax.imshow(img, cmap='viridis')
-#                 fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-#             ax.set_title(title)
-#             ax.axis('off')
-#         plt.tight_layout()
-#         plt.savefig(os.path.join(posterior_dir, f'posterior_components_sample{idx}.png'))
-#         plt.close(fig)
+        fig, axes = plt.subplots(1, len(entries), figsize=(3 * len(entries), 3))
+        for ax, (title, img, clamp) in zip(np.atleast_1d(axes), entries):
+            if clamp:
+                ax.imshow(img, cmap='viridis', vmin=0, vmax=1)
+            else:
+                im = ax.imshow(img, cmap='viridis')
+                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            ax.set_title(title)
+            ax.axis('off')
+        plt.tight_layout()
+        plt.savefig(os.path.join(posterior_dir, f'posterior_components_sample{idx}.png'))
+        plt.close(fig)
 
-#     if y_low.numel() > 0:
-#         traj_np = y_low.detach().cpu().numpy()
-#         time_np = timesteps.detach().cpu().numpy()
-#         total_steps = traj_np.shape[0]
-#         num_ts_cfg = config.get('posterior_num_timesteps', min(total_steps, 10))
-#         num_ts = int(num_ts_cfg) if num_ts_cfg is not None else min(total_steps, 10)
-#         num_ts = max(1, min(num_ts, total_steps))
+    # Save a coarse visualization of the low-res trajectory from noise to final sample.
+    # `y_low` has shape [num_saved_steps, batch, channel, H, W].
+    if y_low.numel() > 0:
+        traj_np = y_low.detach().cpu().numpy()
+        time_np = timesteps.detach().cpu().numpy()
+        total_steps = traj_np.shape[0]
+        num_ts_cfg = config.get('posterior_num_timesteps', min(total_steps, 10))
+        num_ts = int(num_ts_cfg) if num_ts_cfg is not None else min(total_steps, 10)
+        num_ts = max(1, min(num_ts, total_steps))
 
-#         if num_ts >= total_steps:
-#             idx = np.arange(total_steps, dtype=int)
-#         else:
-#             idx = np.linspace(0, total_steps - 1, num_ts, dtype=int)
+        if num_ts >= total_steps:
+            idx = np.arange(total_steps, dtype=int)
+        else:
+            idx = np.linspace(0, total_steps - 1, num_ts, dtype=int)
 
-#         if time_np.shape[0] == total_steps:
-#             disp_times = time_np[idx]
-#         elif time_np.shape[0] == idx.shape[0]:
-#             disp_times = time_np
-#         else:
-#             disp_times = np.linspace(0.0, 1.0, len(idx))
+        if time_np.shape[0] == total_steps:
+            disp_times = time_np[idx]
+        elif time_np.shape[0] == idx.shape[0]:
+            disp_times = time_np
+        else:
+            disp_times = np.linspace(0.0, 1.0, len(idx))
 
-#         fig, axes = plt.subplots(1, len(idx), figsize=(2 * len(idx), 3))
-#         axes = np.atleast_1d(axes)
-#         sample_idx = 0
-#         for ax, step_idx, t_val in zip(axes, idx, disp_times):
-#             ax.imshow(
-#                 traj_np[step_idx, sample_idx, 0],
-#                 cmap='viridis',
-#                 vmin=0,
-#                 vmax=1,
-#             )
-#             ax.axis('off')
-#             if step_idx == 0:
-#                 ax.set_title("Start (noise)", fontsize=10)
-#             elif step_idx == total_steps - 1:
-#                 ax.set_title("Final", fontsize=10)
-#             else:
-#                 ax.set_title(f"Step {t_val:.3f}", fontsize=10)
+        fig, axes = plt.subplots(1, len(idx), figsize=(2 * len(idx), 3))
+        axes = np.atleast_1d(axes)
+        sample_idx = 0
+        for ax, step_idx, t_val in zip(axes, idx, disp_times):
+            ax.imshow(
+                traj_np[step_idx, sample_idx, 0],
+                cmap='viridis',
+                vmin=0,
+                vmax=1,
+            )
+            ax.axis('off')
+            if step_idx == 0:
+                ax.set_title("Start (noise)", fontsize=10)
+            elif step_idx == total_steps - 1:
+                ax.set_title("Final", fontsize=10)
+            else:
+                ax.set_title(f"Step {t_val:.3f}", fontsize=10)
 
-#         fig.suptitle("Posterior SDE Trajectory", fontsize=14)
-#         plt.tight_layout()
-#         fig.savefig(os.path.join(posterior_dir, 'posterior_trajectory.png'))
-#         plt.close(fig)
+        fig.suptitle("Posterior SDE Trajectory", fontsize=14)
+        plt.tight_layout()
+        fig.savefig(os.path.join(posterior_dir, 'posterior_trajectory.png'))
+        plt.close(fig)
 
-#     print(f"Posterior SDE outputs saved to {posterior_dir}")
+    print(f"Posterior SDE outputs saved to {posterior_dir}")
 
 if __name__ == "__main__":
-    main()
+    main_posterior_sde()

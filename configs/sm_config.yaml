@@ -13,11 +13,10 @@ model:
 # Data parameters  
 data:
   angle_path: /pdo/users/jlupoiii/TESS/data/angles/angles_O11-54_data_dic.pkl  # Path to angle data
-  ccd_folder: /pdo/users/jlupoiii/TESS/data/processed_images_im256x256/
+  ccd_folder: /pdo/users/djtufto/data/below_sunshade/ccd
  # Folder containing processed images
-  background_path: null
-  image_shape: [256,256] # Shape of the images
-  patch_size: null # Shape of the patches; null for no patches
+  image_shape: [4096,4096] # Shape of the images
+  patch_size: [256,256] # Shape of the patches; null for no patches
   repeat_factor: 1 # Iterate repeat_factor times over the dataset each epoch
   # mean: 0.01978608595999928 #Dataset mean (for normalization)
   # std: 0.08876927679677006 #Dataset standard deviation (for normalization)

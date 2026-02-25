@@ -14,20 +14,24 @@ data:
   image_shape: [256,256]  # Shape of the images
   patch_size: null # Shape of the patches; null for no patches
   repeat_factor: 1 # Iterate repeat_factor times over the dataset each epoch
-  camera_number: '2'
+  camera_number: '3'
   mean: 0.251619186104019 #Dataset mean (for normalization)
   std: 2.118188109008096 #Dataset standard deviation (for normalization)
 
 # Used for sampling from generate.py
 generation:
-  model_path: /pdo/users/djtufto/BEAM/model_outputs/cam2_11-116/checkpoint_epoch_149_20251204_235551.pth # Path to trained model checkpoint
+  model_path: /pdo/users/djtufto/BEAM/model_outputs/conditional_noise/checkpoint_epoch_final_20251022_060121.pth # Path to trained model checkpoint
   model_path_star: /pdo/users/djtufto/BEAM/model_outputs/conditional_noise/checkpoint_epoch_final_20251008_175925.pth # Path to trained model checkpoint
   params_file: null
-  batch_size: 4 # Batch size
+  batch_size: 1 # Batch size
   n_sample: 1 # Number of samples per datapoint
   num_timesteps: 10 # Number of timesteps to log including endpoints
-  image_shape: [256,256] # Shape of the images
-  output_dir: "model_outputs/january_orbit_counts/" # Directory to save generated images
+  image_shape: [4096,4096] # Shape of the images
+  output_dir: "model_outputs/posterior_demo/" # Directory to save generated images
   orbit_range: null # Orbit range to sample from
   ema: True # Use EMA weights for sampling
   guidance_scale: 1.3 # Guidance scale for sampling
+  light_mean: 0.01978608595999928 # Light model (256x256) normalization mean
+  light_std: 0.08876927679677006 # Light model (256x256) normalization std
+  star_mean: 0.08837062429384838 # Star model (4096x4096) normalization mean
+  star_std: 0.8176902707359797 # Star model (4096x4096) normalization std

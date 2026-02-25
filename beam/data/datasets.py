@@ -21,34 +21,6 @@ from astropy.io import fits
 from collections import OrderedDict
 from scipy.ndimage import binary_dilation
 
-class MMapCache:
-    def __init__(self, max_open: int = 128):
-        self.max_open = int(max_open)
-        self._mm = OrderedDict()
-
-    def _close(self, arr):
-        try:
-            if isinstance(arr, np.memmap) and hasattr(arr, '_mmap') and arr._mmap is not None:
-                arr._mmap.close()
-        except Exception:
-            pass  # best effort
-
-    def get(self, path: str) -> np.ndarray:
-        mm = self._mm.get(path)
-        if mm is not None:
-            self._mm.move_to_end(path)  # mark as recently used
-            return mm
-        mm = np.load(path, mmap_mode='r')  # open new handle
-        self._mm[path] = mm
-        if len(self._mm) > self.max_open:
-            old_path, old_mm = self._mm.popitem(last=False)
-            self._close(old_mm)
-            del old_mm
-        return mm
-
-    def __len__(self):
-        return len(self._mm)
-
 
 class TESSDataset(Dataset):
     """
@@ -78,8 +50,6 @@ class TESSDataset(Dataset):
         self.patch_size = patch_size
         self.repeat_factor = repeat_factor
 
-        self.cache = MMapCache(max_open=512)
-        self.bg_cache = MMapCache(max_open=50)
         self.camera_number = camera_number
 
      
@@ -120,8 +90,6 @@ class TESSDataset(Dataset):
         # store files for use in __getitem__
         self.files = []
         self.ffi_nums = []
-
-        self._cache = None
 
         # with open(f'/pdo/users/djtufto/cam{self.camera_number}/skip.txt', 'r') as f:
         #     skip_set = set(line.strip() for line in f)
@@ -221,6 +189,173 @@ class TESSDataset(Dataset):
 
         # angles_image = torch.zeros_like(angles_image)
         # angles_image = torch.cat([angles_image, conditioning_loc], dim=-1)
+        return {
+            "x": angles_image,       # Orbital parameters (1×12 vector)
+            "y": ffi_image,          # Image (64×64 or other size)
+            "ffi_num": ffi_num,      # FFI identification number
+            "orbit": orbit, # Orbit number
+            }
+
+class StarDataset(Dataset):
+    """
+    Dataset for TESS (Transiting Exoplanet Survey Satellite) images and their
+    corresponding orbital parameters.
+    """
+    def __init__(
+        self,
+        angle_path: str,
+        ccd_folder: str,
+        image_shape: Tuple[int, int],
+        mean: float,
+        std: float,
+        patch_size: Optional[Tuple[int, int]] = None,
+        repeat_factor: int = 1,
+        camera_number: str = '3',
+    ):
+        start_time = time.time()
+        # Define paths and parameters
+        self.ccd_folder = ccd_folder
+        self.image_shape = image_shape
+        self.angle_path = angle_path
+        self.length = 0
+        self.patch_size = patch_size
+        self.repeat_factor = repeat_factor
+        self.camera_number = camera_number
+
+     
+        if self.patch_size is not None:
+            assert self.image_shape[0] % self.patch_size[0] == 0, "Image shape must be divisible by patch size"
+
+            self.ph, self.pw = self.patch_size
+            self.patch_x = self.image_shape[0]//self.pw
+            self.patch_y = self.image_shape[1]//self.ph
+            self.num_patches = self.patch_x * self.patch_y #assume square images and patches so y = x
+            self.embed_dim = 6
+            self.row_embeds = embed_patch(torch.arange(self.patch_x), self.embed_dim)
+            self.col_embeds = embed_patch(torch.arange(self.patch_y), self.embed_dim)
+      
+        
+    
+        # Load orbital parameter dictionary
+        self.angles_dic = pickle.load(open(self.angle_path, "rb"))
+        # Use for med npy
+        # self.MEAN = 0.1154092
+        # self.STD =  0.2346011
+        #use for small npy
+        # self.MEAN = 0.65187982
+        # self.STD =  1.10163832
+        #full
+        # self.MEAN = 0.1099859
+        # self.STD =  0.8313040
+        #use for backgrounds
+        # self.MEAN = 0.08837062429384838 
+        # self.STD =  0.8176902707359797
+        #256x256
+        self.MEAN = mean
+        self.STD = std
+        print(self.MEAN, self.STD)
+        
+        # Find all valid image files that have corresponding angle data
+        # store files for use in __getitem__
+        self.files = []
+        self.ffi_nums = []
+
+        self._cache = None
+
+        # with open(f'/pdo/users/djtufto/cam{self.camera_number}/skip.txt', 'r') as f:
+        #     skip_set = set(line.strip() for line in f)
+        
+        self.skip_count = 0
+        # Load all files in the ccd_folder that have corresponding angle data 
+        for filename in os.listdir(self.ccd_folder):
+            ffi_num = filename[18:18+8]
+            if ffi_num in self.angles_dic.keys():
+                # if filename in skip_set:
+                #     self.skip_count += 1
+                #     continue
+                if self.angles_dic[ffi_num]["below_sunshade"] == True:
+                    self.files.append(filename)
+                    self.ffi_nums.append(ffi_num)
+                    self.length += 1
+        # Convert to tuples to prevent reordering
+
+        self.files = tuple(i for idx, i in enumerate(self.files) if idx % 2 == 0)
+        self.ffi_nums = tuple(i for idx, i in enumerate(self.ffi_nums) if idx % 2 == 0)
+        self.length = len(self.files)
+        
+        end_time = time.time()
+        print(f"Dataset built with {self.length} samples in {end_time - start_time:.2f} seconds")
+
+    def _get_mmap(self, path, cache):
+        mm = cache.get(path)
+        if mm is None:
+            mm = np.load(path, mmap_mode='r')  
+            cache[path] = mm
+        return mm
+
+    def __len__(self) -> int:
+        """Return the number of samples in the dataset."""
+        return self.length * self.repeat_factor 
+        
+    def __getitem__(self, idx: int) -> Dict[str, Union[torch.Tensor, str]]:
+        """
+        Get a sample from the dataset.
+        
+        Args:
+            idx: Index of the sample to retrieve
+            
+        Returns:
+            Dictionary with:
+                - x: Orbital parameters tensor
+                - y: Image tensor
+                - ffi_num: FFI identification number
+                - orbit: Orbit number
+        """
+        file_path = os.path.join(self.ccd_folder, self.files[idx])
+        ffi_num = self.ffi_nums[idx]
+        
+
+        # Load image data
+        # image_arr = pickle.load(open(file_path, "rb"))
+        angles = self.angles_dic[ffi_num]
+        orbit = angles['orbit']
+
+        # Prepare orbital parameters (12 values)
+        params = np.array([
+            angles['1/ED'], angles['1/MD'], 
+            angles['1/ED^2'], angles['1/MD^2'], 
+            angles['Eel'], angles['Eaz'], 
+            angles['Mel'], angles['Maz'], 
+            angles['E' + self.camera_number + 'el'], angles['E' + self.camera_number + 'az'], 
+            angles['M' + self.camera_number + 'el'], angles['M' + self.camera_number + 'az']
+        ])
+        
+        img_arr = np.load(file_path, mmap_mode='r')
+
+        # random patch index
+        patch_idx = torch.randint(self.num_patches, (1,)).item()
+        pr, pc = divmod(patch_idx, self.patch_x)
+        top, left = pr*self.ph, pc*self.pw
+        sl = np.s_[top:top+self.ph, left:left+self.pw]
+
+        # slices are views on the memmap; convert once to torch
+        img = torch.tensor(img_arr[sl], dtype=torch.float32)         # new tensor
+
+        # CHW
+        img = img.unsqueeze(0)
+
+        # subtract + norm
+        img.sub_(self.MEAN).div_(self.STD)
+
+        angles = torch.from_numpy(params).to(torch.float32).unsqueeze(0)
+        cond   = torch.cat([self.row_embeds[pr], self.col_embeds[pc]], dim=-1).unsqueeze(0)
+        angles = torch.cat([angles, cond], dim=1)
+
+
+        ffi_image = img
+
+        angles_image = torch.zeros_like(angles)
+        angles_image = torch.cat([angles_image, cond], dim=-1)
         return {
             "x": angles_image,       # Orbital parameters (1×12 vector)
             "y": ffi_image,          # Image (64×64 or other size)

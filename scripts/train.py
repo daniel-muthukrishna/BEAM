@@ -13,7 +13,7 @@ import torch
 import torch.multiprocessing as mp
 import time
 
-from beam.data.datasets import TESSDataset, create_train_valid_datasets_by_orbit
+from beam.data.datasets import TESSDataset, StarDataset, create_train_valid_datasets_by_orbit
 from beam.models.scores import VESDE, SBD
 from beam.training.trainer import SMTrainer
 from beam.training.distributed import run_distributed
@@ -48,10 +48,9 @@ def prepare_dataset(config):
     """
     # Create dataset
     print(f"Creating TESSDataset...")
-    tess_dataset = TESSDataset(
+    tess_dataset = StarDataset(
         angle_path=config['data_angle_path'],
         ccd_folder=config['data_ccd_folder'],
-        background_path=config['data_background_path'],
         image_shape=config['data_image_shape'],
         patch_size=config.get('data_patch_size', None),
         repeat_factor=config.get('data_repeat_factor', 1),

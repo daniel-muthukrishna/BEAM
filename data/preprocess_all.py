@@ -420,6 +420,9 @@ class Preprocessing:
             if ffi_num not in self.data_dic:
                 print(f"No angle data for {ffi_num}")
                 return  # Skip processing if no angle data
+            elif self.data_dic[ffi_num]["below_sunshade"] == False:
+                print(f"Image {ffi_num} is not below sunshade")
+                return  # Skip processing if image is not below sunshade
             arr = self.get_arr(fits_filename, folder_path)
             # Remove black bars
             arr = np.delete(arr, rows_to_delete, axis=0)
@@ -514,8 +517,9 @@ class Preprocessing:
                 f"{fits_filename[:42]}_processed_im{self.image_size}x{self.image_size}.pkl",
             )
 
-            with open(out_path, "wb") as file:
-                pickle.dump(arr, file)
+            # with open(out_path, "wb") as file:
+            #     pickle.dump(arr, file)
+            np.save(out_path, arr)
         except Exception as e:
             print(f"Error processing {fits_filename}: {e}")
 
