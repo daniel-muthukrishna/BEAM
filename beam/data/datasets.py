@@ -31,7 +31,6 @@ class TESSDataset(Dataset):
         self,
         angle_path: str,
         ccd_folder: str,
-        background_path: str,
         image_shape: Tuple[int, int],
         mean: float,
         std: float,
@@ -44,7 +43,6 @@ class TESSDataset(Dataset):
         self.ccd_folder = ccd_folder
         self.image_shape = image_shape
         self.angle_path = angle_path
-        self.background_path = background_path
 
         self.length = 0
         self.patch_size = patch_size
@@ -68,7 +66,6 @@ class TESSDataset(Dataset):
     
         # Load orbital parameter dictionary
         self.angles_dic = pickle.load(open(self.angle_path, "rb"))
-        self.background_dic = {int(path[1:-19]): path for path in os.listdir(self.background_path) if path.endswith('.npy')}
         # Use for med npy
         # self.MEAN = 0.1154092
         # self.STD =  0.2346011
@@ -84,7 +81,6 @@ class TESSDataset(Dataset):
         #256x256
         self.MEAN = mean
         self.STD = std
-        print(self.MEAN, self.STD)
         
         # Find all valid image files that have corresponding angle data
         # store files for use in __getitem__
@@ -93,23 +89,18 @@ class TESSDataset(Dataset):
 
         # with open(f'/pdo/users/djtufto/cam{self.camera_number}/skip.txt', 'r') as f:
         #     skip_set = set(line.strip() for line in f)
-        
-        self.skip_count = 0
+
+        # self.skip_count = 0
         # Load all files in the ccd_folder that have corresponding angle data 
         for filename in os.listdir(self.ccd_folder):
             ffi_num = filename[18:18+8]
             if ffi_num in self.angles_dic.keys():
-                # if filename in skip_set:
-                #     self.skip_count += 1
-                #     continue
-                if self.angles_dic[ffi_num]["below_sunshade"] == True:
-                    orbit = self.angles_dic[ffi_num]["orbit"]
-                    self.files.append(filename)
-                    self.ffi_nums.append(ffi_num)
-                    self.length += 1
+                self.files.append(filename)
+                self.ffi_nums.append(ffi_num)
+                self.length += 1
         # Convert to tuples to prevent reordering
-        self.files = tuple(self.files)
-        self.ffi_nums = tuple(self.ffi_nums)
+        # self.files = tuple(self.files)
+        # self.ffi_nums = tuple(self.ffi_nums)
         
         end_time = time.time()
         print(f"Dataset built with {self.length} samples in {end_time - start_time:.2f} seconds")

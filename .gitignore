@@ -67,8 +67,8 @@ model_TESS_O11-54_im64x64_multipleGPUs_earlyStop_TEST/
 
 # Testing
 *.png
-FashionMNIST/
 flowtest.ipynb
+docs/
 
 # Cache
 *.pyc

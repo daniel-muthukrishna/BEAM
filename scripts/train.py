@@ -48,7 +48,7 @@ def prepare_dataset(config):
     """
     # Create dataset
     print(f"Creating TESSDataset...")
-    tess_dataset = StarDataset(
+    tess_dataset = TESSDataset(
         angle_path=config['data_angle_path'],
         ccd_folder=config['data_ccd_folder'],
         image_shape=config['data_image_shape'],

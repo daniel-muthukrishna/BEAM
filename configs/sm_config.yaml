@@ -2,26 +2,25 @@
 
 # Model parameters
 model:
-  n_feat: 128           # Number of features in U-Net
+  n_feat: 16           # Number of features in U-Net
   epsilon: 0.0001          # Bound t for stability
   drop_prob: 0.1         # Dropout probability for classifier-free guidance
   architecture: "noise"   # Architecture to use for the model
-  channel_mults: [1, 1, 2, 2, 2] # Channel multipliers for the U-Net: layer i has n_feat*channel_mults[i] features
-  heads_at: [2,3,4] # Use attention at these indices in above channel_mults
-  num_res: 2 # Number of residual blocks in each layer; if int, same for all layers
+  channel_mults: [1,2,4,8,16,32,32,32] # Channel multipliers for the U-Net: layer i has n_feat*channel_mults[i] features
+  heads_at: [5,6,7] # Use attention at these indices in above channel_mults
+  num_res: [2,2,2,2,2,1,1,1] # Number of residual blocks in each layer; if int, same for all layers
 
 # Data parameters  
 data:
   angle_path: /pdo/users/jlupoiii/TESS/data/angles/angles_O11-54_data_dic.pkl  # Path to angle data
-  ccd_folder: /pdo/users/djtufto/data/below_sunshade/ccd
- # Folder containing processed images
-  image_shape: [4096,4096] # Shape of the images
-  patch_size: [256,256] # Shape of the patches; null for no patches
+  ccd_folder: "/pdo/users/jlupoiii/TESS/data/processed_images_im1024x1024" # Folder containing processed images
+  image_shape: [1024,1024] # Shape of the images
+  patch_size: null # Shape of the patches; null for no patches
   repeat_factor: 1 # Iterate repeat_factor times over the dataset each epoch
   # mean: 0.01978608595999928 #Dataset mean (for normalization)
   # std: 0.08876927679677006 #Dataset standard deviation (for normalization)
-  mean: 0.008836520907439251 #Dataset mean (for normalization)
-  std: 0.06466536033658327 #Dataset standard deviation (for normalization)
+  mean: 0 #Dataset mean (for normalization)
+  std: 1 #Dataset standard deviation (for normalization)
   # mean: 0.251619186104019 #Dataset mean (for normalization)
   # std: 2.118188109008096 #Dataset standard deviation (for normalization)
   camera_number: '3'
@@ -38,8 +37,8 @@ optimizer:
 
 # Training parameters
 training:
-  n_epoch: 600          # Maximum number of epochs
-  batch_size: 24         # Batch size
+  n_epoch: 200          # Maximum number of epochs
+  batch_size: 1         # Batch size
   patience: 1000          # Early stopping patience
   mixed_precision: True # Use BF16 for training
 

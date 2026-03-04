@@ -611,6 +611,141 @@ class PosteriorSDE():
         return ys_saved, self.t[0, ret_idx]
 
 
+class LikelihoodLangevin():
+    """
+    Likelihood-only Langevin sampler at full 4096x4096 resolution.
+
+    State variable X is a light estimate (4096x4096).
+    Likelihood: P(obs | X) = Q(obs - X) where Q is the star distribution.
+    Langevin update uses grad_X log Q(obs - X) = -s_star(obs - X).
+
+    The star score is evaluated tile-wise (16x16 grid of 256x256 tiles)
+    using the v-parameterized star U-Net (unconditional, no CFG).
+    """
+
+    def __init__(self, star_score, x_obs: torch.Tensor, sigma,
+                 star_mean: float, star_std: float,
+                 tile_size: int = 256, num_steps: int = 100,
+                 step_size: float = 0.01, num_save: int = 1,
+                 star_tile_microbatch: int = 160):
+        self.star_score = star_score
+        self.x_obs = x_obs
+        self.sigma = sigma
+        self.star_mean = star_mean
+        self.star_std = star_std
+        self.tile_size = tile_size
+        self.num_steps = num_steps
+        self.step_size = step_size
+        self.num_save = num_save
+        self.star_tile_microbatch = star_tile_microbatch
+        self.alpha = OTAlpha()
+        self.beta = VPBeta()
+
+    def _sigma_t(self, t, ref):
+        if isinstance(self.sigma, float):
+            return torch.full_like(ref, self.sigma)
+        return self.sigma(t)
+
+    def _v_to_score(self, x, v_param, t):
+        """Convert v-parameterization output to score for the star model."""
+        alpha = self.alpha(t)
+        beta = self.beta(t).clamp_min(1e-12)
+        return -(alpha * v_param / beta + x)
+
+    def star_fullres(self, residual, t):
+        """
+        Evaluate star score on full 4096x4096 residual via tiling.
+        Returns the reassembled 4096x4096 score.
+        """
+        B, C, H, W = residual.shape
+        T = self.tile_size
+        assert H == 4096 and W == 4096, "tiler assumes 4096x4096"
+
+        tiles = residual.view(B, C, H // T, T, W // T, T)
+        tiles = tiles.permute(0, 2, 4, 1, 3, 5).contiguous()
+        tiles = tiles.view(-1, C, T, T)
+
+        c_zero = torch.zeros(1, 1, 24, device=residual.device, dtype=residual.dtype)
+        g_tile_chunks = []
+        mb = self.star_tile_microbatch
+        for start in range(0, tiles.shape[0], mb):
+            end = min(start + mb, tiles.shape[0])
+            tile_mb = tiles[start:end]
+            n = tile_mb.shape[0]
+            c_mb = c_zero.expand(n, -1, -1)
+            t_mb = t.expand(n, *t.shape[1:])
+            cm_mb = torch.zeros(n, *c_zero.shape[1:], device=residual.device, dtype=residual.dtype)
+
+            v_param = self.star_score(tile_mb, c_mb, t_mb, cm_mb)
+            score_mb = self._v_to_score(tile_mb, v_param, t_mb)
+            g_tile_chunks.append(score_mb)
+
+        g_tiles = torch.cat(g_tile_chunks, dim=0)
+        out = g_tiles.view(B, H // T, W // T, C, T, T).permute(0, 3, 1, 4, 2, 5)
+        return out.reshape(B, C, H, W)
+
+    def likelihood_score(self, X, t):
+        """
+        Compute grad_X log P(obs | X) = grad_X log Q(obs - X) = -s_star(obs - X).
+
+        Normalizes the residual into the star model's training domain,
+        evaluates the tiled star score, then un-normalizes.
+        """
+        residual_raw = self.x_obs - X
+        residual_norm = (residual_raw - self.star_mean) / self.star_std
+
+        s_star = self.star_fullres(residual_norm, t)
+
+        # s_star is d/d(residual_norm) log Q(residual_norm).
+        # Chain rule through normalization: d/d(residual_raw) = s_star / star_std.
+        # Chain rule through subtraction: d/dX = -d/d(residual_raw).
+        return -s_star / self.star_std
+
+    @torch.no_grad()
+    def simulate(self, X0):
+        """
+        Run Langevin dynamics on the likelihood P(obs | X) = Q(obs - X).
+
+        Args:
+            X0: (B, 1, 4096, 4096) initial light estimate
+
+        Returns:
+            (Xs_saved, step_indices): saved snapshots and their step numbers
+        """
+        X = X0.clone()
+        B, C, H, W = X0.shape
+        h = self.step_size
+
+        if self.num_save <= 1:
+            save_at = {self.num_steps - 1}
+        else:
+            save_at = set(
+                torch.linspace(0, self.num_steps - 1, self.num_save, dtype=torch.long).tolist()
+            )
+
+        Xs_saved = torch.empty(self.num_save, B, C, H, W, device=X.device, dtype=X.dtype)
+        sv_ptr = 0
+
+        # Fixed time near t=1 (refining a near-clean image, not denoising from noise)
+        t_fixed = torch.tensor(1.0 - 1e-4, device=X.device).view(1, 1, 1, 1)
+        sigma_t = self._sigma_t(t_fixed, ref=X)
+
+        for k in tqdm(range(self.num_steps)):
+            if k in save_at and sv_ptr < self.num_save:
+                Xs_saved[sv_ptr] = X
+                sv_ptr += 1
+
+            grad = self.likelihood_score(X, t_fixed)
+            X = X + 0.5 * sigma_t ** 2 * grad * h
+            X = X + sigma_t * (h ** 0.5) * torch.randn_like(X)
+
+        if sv_ptr < self.num_save:
+            Xs_saved[-1] = X
+
+        step_indices = sorted(save_at)
+        return Xs_saved, step_indices
+
+
 
 
     
