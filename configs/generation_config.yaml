@@ -9,7 +9,7 @@ model:
 
 data:
   angle_path: "/pdo/users/jlupoiii/TESS/data/angles/angles_O11-54_data_dic.pkl"  # Path to angle data
-  ccd_folder: "/pdo/users/jlupoiii/TESS/data/processed_images_im4096x4096"  # Folder containing processed images
+  ccd_folder: "/pdo/users/jlupoiii/TESS/data/processed_images_im4096x4096/"  # Folder containing processed images
   background_path: null  # Folder containing background images
   image_shape: [4096,4096]  # Shape of the images
   patch_size: null # Shape of the patches; null for no patches
@@ -21,11 +21,16 @@ data:
 # Used for sampling from generate.py (likelihood-only Langevin)
 generation:
   model_path_star: /pdo/users/djtufto/BEAM/model_outputs/conditional_noise/checkpoint_epoch_final_20251008_175925.pth
+  model_path_light: /pdo/users/djtufto/BEAM/model_outputs/conditional_noise/checkpoint_epoch_final_20251022_060121.pth
+  context_len_light: 12 # Context length for the light model UNet
   batch_size: 1
   num_timesteps: 10 # Number of snapshots to save along the trajectory
-  output_dir: "model_outputs/likelihood_langevin/"
+  output_dir: "model_outputs/comparison/"
   ema: True # Use EMA weights for sampling
   star_mean: 0.08837062429384838 # Star model normalization mean
   star_std: 0.8176902707359797 # Star model normalization std
+  light_mean: 0.01978608595999928 # Light model normalization mean
+  light_std: 0.08876927679677006 # Light model normalization std
+  guidance_scale: 2.0 # CFG guidance scale for the light model
   num_langevin_steps: 30 # Number of Langevin iterations
-  langevin_step_size: 0.5 # Step size for each Langevin update
+  langevin_step_size: 0.01 # Step size for each Langevin update

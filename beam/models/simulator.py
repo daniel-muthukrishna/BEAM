@@ -602,13 +602,15 @@ class PosteriorSDE():
             y = y +  (self.vector_field_light(y, c, t[..., None, None, None]) + sL_low*0.5*sigma_t**2) * h 
             y = y + torch.randn_like(y) * sigma_t * (h ** 0.5) #prediction step using prior model
 
+        y_pre_correction = y.clone()
+
         for _ in range(self.num_corrections):
             score,_,_ = self.score(y, c, t[..., None, None, None])
             y = y + 0.5*sigma_t**2 * score * self.corr_step_size + torch.randn_like(y) * sigma_t * (self.corr_step_size ** 0.5) #posterior correction
 
         if (self.num_steps - 1) == next_save_idx:
             ys_saved[-1] = y
-        return ys_saved, self.t[0, ret_idx]
+        return ys_saved, self.t[0, ret_idx], y_pre_correction
 
 
 class LikelihoodLangevin():

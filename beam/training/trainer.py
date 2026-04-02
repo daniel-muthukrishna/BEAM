@@ -137,18 +137,18 @@ class SMTrainer:
             persistent_workers=True,
             drop_last=True, 
             sampler=train_sampler,
-            shuffle=(train_sampler is None)
+            shuffle=(train_sampler is None),
         )
         
         valid_loader = DataLoader(
             self.valid_dataset, 
             batch_size=self.config['training_batch_size'], 
             pin_memory=True,
-            num_workers=2, 
+            num_workers=2,
             persistent_workers=True,
             drop_last=True, 
             sampler=valid_sampler,
-            shuffle=False
+            shuffle=False,
         )
         
         return train_loader, valid_loader

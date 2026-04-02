@@ -10,6 +10,16 @@ import multiprocessing
 from tqdm import tqdm
 
 
+ORBIT_REMAP = {
+    "10": "9", "11": "12", "13": "14", "15": "16",
+    "28": "27", "30": "29", "32": "31", "34": "33",
+    "37": "38", "56": "55", "60": "59", "61": "62",
+    "63": "64", "80": "79", "82": "81", "84": "83",
+    "85": "86", "87": "88", "89": "90", "91": "92",
+    "100": "99",
+}
+
+
 def show_img(
     arr: np.ndarray,
     title: str = "",
@@ -255,7 +265,7 @@ class Preprocessing:
         for fits_filename in os.listdir(folder_path):
             if fits_filename.endswith(".fits") or fits_filename.endswith(".fits.gz"):
                 ffi_num = fits_filename[18:26]
-                if ffi_num in ffis_in_orbit_below_sunshade:
+                if ffi_num in ffis_in_orbit_below_sunshade and fits_filename[27] == self.camera_number: #user defined camera number
                     args.append(
                         (
                             self,
@@ -270,23 +280,27 @@ class Preprocessing:
             return
         # Sequentially process background images in this orbit
         print(f"Number of images below sunshade in orbit {orbit}: {len(args)}")
-        orbit_images_below_sunshade = [
-            Preprocessing.background_image_worker(arg) for arg in args
-        ]
-        orbit_images_below_sunshade = np.array(
-            [k for k in orbit_images_below_sunshade if k is not None]
-        )
-        if len(orbit_images_below_sunshade) == 0:
+        running_sum = None
+        count = 0
+        for arg in args:
+            result = Preprocessing.background_image_worker(arg)
+            if result is not None:
+                if running_sum is None:
+                    running_sum = result.astype(np.float64)
+                else:
+                    running_sum += result
+                count += 1
+        if count == 0:
             print(f"No images below sunshade in orbit {orbit} (len 0)")
             return
-        arr_average = np.average(np.array(orbit_images_below_sunshade), axis=0)
+        arr_average = running_sum / count
         out_path = os.path.join(
             self.background_ccd_folder, f"O{orbit}_background_ccd.pkl"
         )
         with open(out_path, "wb") as file:
             pickle.dump(arr_average, file)
             print(f"Saved average background image to {str(file.name)}")
-        print(f"{len(orbit_images_below_sunshade)} images averaged in orbit {orbit}")
+        print(f"{count} images averaged in orbit {orbit}")
         if self.display_images_folder and i == 0:
             show_img(
                 arr_average,
@@ -312,7 +326,6 @@ class Preprocessing:
         if (
             len(fits_filename) > 40
             and fits_filename.endswith((".fits", ".fits.gz"))
-            and fits_filename[27] == self.camera_number #user defined camera number
         ):
             
 
@@ -344,6 +357,7 @@ class Preprocessing:
             list(range(0, 44)) + list(range(2092, 2180)) + list(range(4228, 4272))
         )
         orbit_to_folder = {}
+        skipped_orbits = set()
 
         for i, fits_folder in enumerate(self.fits_folder_paths):
             # orbit = ( # old orbit naming convention
@@ -359,9 +373,10 @@ class Preprocessing:
                 (self, folder_path, orbit, i, rows_to_delete, columns_to_delete)
             )
         with multiprocessing.Pool(self.num_workers) as pool:
-            for _ in pool.imap_unordered(Preprocessing.image_orbit_worker, orbit_args):
-                continue
-        print(f"Skipped orbits: {sorted(self.skipped_orbits)}")
+            for result in pool.imap_unordered(Preprocessing.image_orbit_worker, orbit_args):
+                if result is not None:
+                    skipped_orbits.add(result)
+        print(f"Skipped orbits: {sorted(skipped_orbits)}")
     @staticmethod
     def image_orbit_worker(args) -> None:
         """
@@ -375,6 +390,11 @@ class Preprocessing:
         """
         self, folder_path, orbit, i, rows_to_delete, columns_to_delete = args
         image_args = []
+        orbit_to_subtract = ORBIT_REMAP.get(orbit, orbit)
+        bg_path = os.path.join(self.background_ccd_folder, f"O{orbit_to_subtract}_background_ccd.pkl")
+        if not os.path.exists(bg_path):
+            print(f"Warning: No background for orbit {orbit} (looked for {orbit_to_subtract}). Skipping.")
+            return orbit
         # Only process files from camera x
         for fits_filename in os.listdir(folder_path):
             if (
@@ -402,6 +422,7 @@ class Preprocessing:
             leave=False,
         ):
             Preprocessing.image_worker(arg)
+        
 
     @staticmethod
     def image_worker(args) -> None:
@@ -420,9 +441,11 @@ class Preprocessing:
             if ffi_num not in self.data_dic:
                 print(f"No angle data for {ffi_num}")
                 return  # Skip processing if no angle data
-            elif self.data_dic[ffi_num]["below_sunshade"] == False:
-                print(f"Image {ffi_num} is not below sunshade")
+            if self.data_dic[ffi_num]["below_sunshade"] == False:
                 return  # Skip processing if image is not below sunshade
+            # elif self.data_dic[ffi_num]["below_sunshade"] == False:
+            #     print(f"Image {ffi_num} is not below sunshade")
+            #     return  # Skip processing if image is not below sunshade
             arr = self.get_arr(fits_filename, folder_path)
             # Remove black bars
             arr = np.delete(arr, rows_to_delete, axis=0)
@@ -436,64 +459,15 @@ class Preprocessing:
 
             # Orbit mapping from notebook
             orbit = self.data_dic[ffi_num]["orbit"]
-            orbit_to_subtract = orbit
-            if orbit == "10":
-                orbit_to_subtract = "9"
-            if orbit == "11":
-                orbit_to_subtract = "12"
-            if orbit == "13":
-                orbit_to_subtract = "14"
-            if orbit == "15":
-                orbit_to_subtract = "16"
-            if orbit == "28":
-                orbit_to_subtract = "27"
-            if orbit == "30":
-                orbit_to_subtract = "29"
-            if orbit == "32":
-                orbit_to_subtract = "31"
-            if orbit == "34":
-                orbit_to_subtract = "33"
-            if orbit == "37":
-                orbit_to_subtract = "38"
-            if orbit == "56":
-                orbit_to_subtract = "55"
-            if orbit == "60":
-                orbit_to_subtract = "59"
-            if orbit == "61":
-                orbit_to_subtract = "62"
-            if orbit == "63":
-                orbit_to_subtract = "64"
-            if orbit == "80":
-                orbit_to_subtract = "79"
-            if orbit == "82":
-                orbit_to_subtract = "81"
-            if orbit == "84":   
-                orbit_to_subtract = "83"
-            if orbit == "85":
-                orbit_to_subtract = "86"
-            if orbit == "87":
-                orbit_to_subtract = "88"
-            if orbit == "89":
-                orbit_to_subtract = "90"
-            if orbit == "91":
-                orbit_to_subtract = "92"
-            if orbit == "100":
-                orbit_to_subtract = "99"
-            
-            
+            # orbit_to_subtract = ORBIT_REMAP.get(orbit, orbit)
 
-
-            bg_path = os.path.join(
-                self.background_ccd_folder, f"O{orbit_to_subtract}_background_ccd.pkl"
-            )
-            if os.path.exists(bg_path):
-                background_avg_image = pickle.load(open(bg_path, "rb"))
-                arr = arr - background_avg_image
-            else:
-                print(
-                    f"Warning: Background file {bg_path} not found. Skipping subtraction for {fits_filename}."
-                )
-                self.skipped_orbits.add(orbit)
+            # bg_path = os.path.join(
+            #     self.background_ccd_folder, f"O{orbit_to_subtract}_background_ccd.pkl"
+            # )
+            # with open(bg_path, "rb") as file:
+            #     background_avg_image = pickle.load(file)
+            # arr = arr - background_avg_image
+                
             # Pixel scaling
             scale_factor = 1 / 633118 
             arr *= scale_factor
@@ -514,12 +488,12 @@ class Preprocessing:
             # Save as pickle
             out_path = os.path.join(
                 self.ccd_folder,
-                f"{fits_filename[:42]}_processed_im{self.image_size}x{self.image_size}.pkl",
+                f"{fits_filename[:42]}_processed_im{self.image_size}x{self.image_size}",
             )
 
             # with open(out_path, "wb") as file:
             #     pickle.dump(arr, file)
-            np.save(out_path, arr)
+            np.save(out_path, arr, allow_pickle=False)
         except Exception as e:
             print(f"Error processing {fits_filename}: {e}")
 

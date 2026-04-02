@@ -48,28 +48,26 @@ def prepare_dataset(config):
     """
     # Create dataset
     print(f"Creating TESSDataset...")
-    tess_dataset = TESSDataset(
+    tess_dataset = StarDataset(
         angle_path=config['data_angle_path'],
         ccd_folder=config['data_ccd_folder'],
         image_shape=config['data_image_shape'],
         patch_size=config.get('data_patch_size', None),
         repeat_factor=config.get('data_repeat_factor', 1),
-        mean=config.get('data_mean', 0.01978608595999928),
-        std=config.get('data_std', 0.08876927679677006),
+        orbit_skip=config.get('data_orbit_skip', []),
+        mean=config.get('data_mean', 0),
+        std=config.get('data_std', 1),
         camera_number=config.get('data_camera_number', '3'),
     )
     presplit_time = time.time()
     # Create training and validation splits based on orbit number (fast, metadata only)
     print("Creating training and validation splits by orbit...")
     train_dataset, valid_dataset = create_train_valid_datasets_by_orbit(
-        tess_dataset
+        tess_dataset,
+        config["data_orbit_threshold"],
+        config["data_orbit_max"],
     )
     
-    # Print dataset statistics
-    print(f'Created splits in {time.time() - presplit_time:.2f} seconds')
-    print(f'Full dataset has {len(tess_dataset)} datapoints')
-    print(f'Training dataset has {len(train_dataset)} datapoints')
-    print(f'Validation dataset has {len(valid_dataset)} datapoints')
     return train_dataset, valid_dataset
 
 
@@ -122,8 +120,8 @@ def create_callbacks(config, args, rank):
                 log_model_freq=config.get('wandb_log_model_freq', 20),
                 use_wandb=True,
                 mode=args.wandb,
-                MEAN=config.get('data_mean', 0.01978608595999928),
-                STD=config.get('data_std', 0.08876927679677006)
+                MEAN=config.get('data_mean', 0),
+                STD=config.get('data_std', 1)
             )
             callbacks.append(wandb_callback)
     

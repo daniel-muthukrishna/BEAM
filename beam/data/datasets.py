@@ -150,8 +150,9 @@ class TESSDataset(Dataset):
             angles['M' + self.camera_number + 'el'], angles['M' + self.camera_number + 'az']
         ])
         
-        image_arr = pickle.load(open(file_path, "rb")) if self.patch_size is None else np.load(file_path, mmap_mode='r')
- 
+        image_arr = pickle.load(open(file_path, "rb")) if self.patch_size is None else np.load(file_path, mmap_mode='r')            
+
+        # Apply patch if patch_size is not None
         if self.patch_size is not None:
             patch_idx = torch.randint(self.num_patches, (1,))
             patch_row, patch_col = divmod(patch_idx.item(), self.patch_x)
@@ -178,6 +179,9 @@ class TESSDataset(Dataset):
         angles_image = transform(angles_image)
         ffi_image = target_transform(ffi_image)
 
+        if int(orbit) > 61:
+            ffi_image.mul_(3)
+
         # angles_image = torch.zeros_like(angles_image)
         # angles_image = torch.cat([angles_image, conditioning_loc], dim=-1)
         return {
@@ -200,6 +204,7 @@ class StarDataset(Dataset):
         mean: float,
         std: float,
         patch_size: Optional[Tuple[int, int]] = None,
+        orbit_skip: List[int] = [],
         repeat_factor: int = 1,
         camera_number: str = '3',
     ):
@@ -216,32 +221,17 @@ class StarDataset(Dataset):
      
         if self.patch_size is not None:
             assert self.image_shape[0] % self.patch_size[0] == 0, "Image shape must be divisible by patch size"
-
             self.ph, self.pw = self.patch_size
             self.patch_x = self.image_shape[0]//self.pw
             self.patch_y = self.image_shape[1]//self.ph
             self.num_patches = self.patch_x * self.patch_y #assume square images and patches so y = x
-            self.embed_dim = 6
-            self.row_embeds = embed_patch(torch.arange(self.patch_x), self.embed_dim)
-            self.col_embeds = embed_patch(torch.arange(self.patch_y), self.embed_dim)
+    
       
         
     
         # Load orbital parameter dictionary
         self.angles_dic = pickle.load(open(self.angle_path, "rb"))
-        # Use for med npy
-        # self.MEAN = 0.1154092
-        # self.STD =  0.2346011
-        #use for small npy
-        # self.MEAN = 0.65187982
-        # self.STD =  1.10163832
-        #full
-        # self.MEAN = 0.1099859
-        # self.STD =  0.8313040
-        #use for backgrounds
-        # self.MEAN = 0.08837062429384838 
-        # self.STD =  0.8176902707359797
-        #256x256
+
         self.MEAN = mean
         self.STD = std
         print(self.MEAN, self.STD)
@@ -251,25 +241,18 @@ class StarDataset(Dataset):
         self.files = []
         self.ffi_nums = []
 
-        self._cache = None
-
-        # with open(f'/pdo/users/djtufto/cam{self.camera_number}/skip.txt', 'r') as f:
-        #     skip_set = set(line.strip() for line in f)
+        self.orbit_skip = set(orbit_skip)
         
-        self.skip_count = 0
         # Load all files in the ccd_folder that have corresponding angle data 
         for filename in os.listdir(self.ccd_folder):
             ffi_num = filename[18:18+8]
             if ffi_num in self.angles_dic.keys():
-                # if filename in skip_set:
-                #     self.skip_count += 1
-                #     continue
-                if self.angles_dic[ffi_num]["below_sunshade"] == True:
+                if (self.angles_dic[ffi_num]["below_sunshade"] and int(self.angles_dic[ffi_num]["orbit"]) not in self.orbit_skip):
                     self.files.append(filename)
                     self.ffi_nums.append(ffi_num)
                     self.length += 1
-        # Convert to tuples to prevent reordering
 
+        # Convert to tuples to prevent reordering
         self.files = tuple(i for idx, i in enumerate(self.files) if idx % 2 == 0)
         self.ffi_nums = tuple(i for idx, i in enumerate(self.ffi_nums) if idx % 2 == 0)
         self.length = len(self.files)
@@ -277,12 +260,6 @@ class StarDataset(Dataset):
         end_time = time.time()
         print(f"Dataset built with {self.length} samples in {end_time - start_time:.2f} seconds")
 
-    def _get_mmap(self, path, cache):
-        mm = cache.get(path)
-        if mm is None:
-            mm = np.load(path, mmap_mode='r')  
-            cache[path] = mm
-        return mm
 
     def __len__(self) -> int:
         """Return the number of samples in the dataset."""
@@ -311,16 +288,6 @@ class StarDataset(Dataset):
         angles = self.angles_dic[ffi_num]
         orbit = angles['orbit']
 
-        # Prepare orbital parameters (12 values)
-        params = np.array([
-            angles['1/ED'], angles['1/MD'], 
-            angles['1/ED^2'], angles['1/MD^2'], 
-            angles['Eel'], angles['Eaz'], 
-            angles['Mel'], angles['Maz'], 
-            angles['E' + self.camera_number + 'el'], angles['E' + self.camera_number + 'az'], 
-            angles['M' + self.camera_number + 'el'], angles['M' + self.camera_number + 'az']
-        ])
-        
         img_arr = np.load(file_path, mmap_mode='r')
 
         # random patch index
@@ -338,18 +305,15 @@ class StarDataset(Dataset):
         # subtract + norm
         img.sub_(self.MEAN).div_(self.STD)
 
-        angles = torch.from_numpy(params).to(torch.float32).unsqueeze(0)
-        cond   = torch.cat([self.row_embeds[pr], self.col_embeds[pc]], dim=-1).unsqueeze(0)
-        angles = torch.cat([angles, cond], dim=1)
+        if int(orbit) > 61:
+            img.mul_(3)
 
-
-        ffi_image = img
-
-        angles_image = torch.zeros_like(angles)
-        angles_image = torch.cat([angles_image, cond], dim=-1)
+        # unconditional model 
+        angles_image = torch.zeros(1, 12)
+   
         return {
             "x": angles_image,       # Orbital parameters (1×12 vector)
-            "y": ffi_image,          # Image (64×64 or other size)
+            "y": img,          # Image (64×64 or other size)
             "ffi_num": ffi_num,      # FFI identification number
             "orbit": orbit, # Orbit number
             }
@@ -417,7 +381,7 @@ def embed_patch(prow, embed_dim):
 
 
 
-def create_train_valid_datasets_by_orbit(dataset: TESSDataset, orbit_threshold: int = 47, max_orbit: int = 100):
+def create_train_valid_datasets_by_orbit(dataset: TESSDataset, orbit_threshold: int = 90, max_orbit: int = 100):
     """
     Create training and validation datasets from a TESSDataset using orbit number as the split criterion.
     Orbits <= orbit_threshold go to training, orbits > orbit_threshold go to validation.
