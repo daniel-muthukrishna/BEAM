@@ -328,10 +328,10 @@ class ODEIntegrator(Simulator):
             return self.ode.velocity_field(x, c, t.expand(bs, 1, 1, 1)) 
         x = odeint(drift_helper, x, ts, method=self.method, atol=self.atol, rtol=self.rtol, )
         if self.num_save == 1:
-            ret_idx = -1
+            ret_idx = torch.tensor([self.num_steps - 1], device=x.device, dtype=torch.long)
         else:
             ret_idx = torch.linspace(0, self.num_steps-1, steps = self.num_save, device=x.device, dtype = torch.long)
-        return x[ret_idx, ...], ts[ret_idx] #return last step
+        return x[ret_idx, ...], ts[ret_idx]
     
 class EulerMaruyama(Simulator):
     """
@@ -629,7 +629,22 @@ class LikelihoodLangevin():
                  star_mean: float, star_std: float,
                  tile_size: int = 256, num_steps: int = 100,
                  step_size: float = 0.01, num_save: int = 1,
-                 star_tile_microbatch: int = 160):
+                 star_tile_microbatch: int = 160,
+                 context_len: int = 12,
+                 save_start_step: int = 0,
+                 lazy_start_step: Optional[int] = None,
+                 lazy_interval: int = 1):
+        """
+        Args (new):
+            save_start_step: Step index at which snapshot collection begins.
+                Snapshots are placed evenly between this step and num_steps-1.
+                Use this as a "burn-in" for single-chain averaging.
+            lazy_start_step: Step index at which lazy score updates begin.
+                If None (default), the score is recomputed every iteration.
+            lazy_interval: Number of iterations between score recomputations
+                once lazy updates are active (i.e. k >= lazy_start_step).
+                A value of 1 is equivalent to disabling lazy updates.
+        """
         self.star_score = star_score
         self.x_obs = x_obs
         self.sigma = sigma
@@ -640,6 +655,10 @@ class LikelihoodLangevin():
         self.step_size = step_size
         self.num_save = num_save
         self.star_tile_microbatch = star_tile_microbatch
+        self.context_len = context_len
+        self.save_start_step = max(0, min(int(save_start_step), num_steps - 1))
+        self.lazy_start_step = lazy_start_step
+        self.lazy_interval = max(1, int(lazy_interval))
         self.alpha = OTAlpha()
         self.beta = VPBeta()
 
@@ -667,7 +686,7 @@ class LikelihoodLangevin():
         tiles = tiles.permute(0, 2, 4, 1, 3, 5).contiguous()
         tiles = tiles.view(-1, C, T, T)
 
-        c_zero = torch.zeros(1, 1, 24, device=residual.device, dtype=residual.dtype)
+        c_zero = torch.zeros(1, 1, self.context_len, device=residual.device, dtype=residual.dtype)
         g_tile_chunks = []
         mb = self.star_tile_microbatch
         for start in range(0, tiles.shape[0], mb):
@@ -716,31 +735,63 @@ class LikelihoodLangevin():
         """
         X = X0.clone()
         B, C, H, W = X0.shape
-        h = self.step_size
+        h = float(self.step_size)
 
+        # Snapshots are placed evenly between save_start_step and num_steps-1.
+        # With save_start_step=0 this reproduces the previous behaviour.
         if self.num_save <= 1:
             save_at = {self.num_steps - 1}
         else:
             save_at = set(
-                torch.linspace(0, self.num_steps - 1, self.num_save, dtype=torch.long).tolist()
+                torch.linspace(
+                    self.save_start_step,
+                    self.num_steps - 1,
+                    self.num_save,
+                    dtype=torch.long,
+                ).tolist()
             )
 
         Xs_saved = torch.empty(self.num_save, B, C, H, W, device=X.device, dtype=X.dtype)
         sv_ptr = 0
 
         # Fixed time near t=1 (refining a near-clean image, not denoising from noise)
-        t_fixed = torch.tensor(1.0 - 1e-4, device=X.device).view(1, 1, 1, 1)
+        t_fixed = torch.tensor(0.99, device=X.device).view(1, 1, 1, 1)
         sigma_t = self._sigma_t(t_fixed, ref=X)
 
+        cached_grad = None
+        steps_since_refresh = 0
         for k in tqdm(range(self.num_steps)):
             if k in save_at and sv_ptr < self.num_save:
                 Xs_saved[sv_ptr] = X
                 sv_ptr += 1
 
-            grad = self.likelihood_score(X, t_fixed)
-            X = X + 0.5 * sigma_t ** 2 * grad * h
-            X = X + sigma_t * (h ** 0.5) * torch.randn_like(X)
+            lazy_active = (
+                self.lazy_start_step is not None and k >= self.lazy_start_step
+            )
+            if (
+                cached_grad is None
+                or not lazy_active
+                or steps_since_refresh >= self.lazy_interval
+            ):
+                grad = self.likelihood_score(X, t_fixed)
+                cached_grad = grad
+                steps_since_refresh = 1
+                refreshed = True
+            else:
+                grad = cached_grad
+                steps_since_refresh += 1
+                refreshed = False
 
+            drift = 0.5 * sigma_t ** 2 * grad * h
+            # noise = sigma_t * (h ** 0.5) * torch.randn_like(X)
+            print(
+                f"  step {k:4d} | |score|={grad.abs().mean().item():.3e} "
+                f"| |drift|={drift.abs().mean().item():.3e} "
+                # f"| |noise|={noise.abs().mean().item():.3e}"
+                f" | score={'fresh' if refreshed else 'cached'}"
+            )
+            # X = X + drift  + noise 
+            X = X + drift 
         if sv_ptr < self.num_save:
             Xs_saved[-1] = X
 

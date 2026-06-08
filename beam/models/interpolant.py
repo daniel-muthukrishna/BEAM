@@ -96,7 +96,6 @@ class ScoreMatch(nn.Module):
         
         x0 = torch.randn(c_i.shape[0]*n_sample, 1, *size, device=device) # random noise of shape (n_sample*n_datapoint, 1, *size) 
         if self.architecture == "flow":
-            num_steps = 1000
             ode = ODE(self.nn_model, guidance_scale)
             t0 = torch.linspace(epsilon, 1.0 - epsilon, num_steps, device=device)
             t = t0.unsqueeze(0).expand(1, num_steps) #(1, num_steps)

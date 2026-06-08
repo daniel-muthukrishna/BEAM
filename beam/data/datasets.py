@@ -108,7 +108,7 @@ class TESSDataset(Dataset):
     def _get_mmap(self, path, cache):
         mm = cache.get(path)
         if mm is None:
-            mm = np.load(path, mmap_mode='r')  
+            mm = np.load(path, mmap_mode='r', allow_pickle=True)  
             cache[path] = mm
         return mm
 
@@ -150,7 +150,7 @@ class TESSDataset(Dataset):
             angles['M' + self.camera_number + 'el'], angles['M' + self.camera_number + 'az']
         ])
         
-        image_arr = pickle.load(open(file_path, "rb")) if self.patch_size is None else np.load(file_path, mmap_mode='r')            
+        image_arr = pickle.load(open(file_path, "rb")) if self.patch_size is None else np.load(file_path, mmap_mode='r', allow_pickle=True)            
 
         # Apply patch if patch_size is not None
         if self.patch_size is not None:
@@ -245,7 +245,7 @@ class StarDataset(Dataset):
         
         # Load all files in the ccd_folder that have corresponding angle data 
         for filename in os.listdir(self.ccd_folder):
-            ffi_num = filename[18:18+8]
+            ffi_num = filename.split('-')[2]
             if ffi_num in self.angles_dic.keys():
                 if (self.angles_dic[ffi_num]["below_sunshade"] and int(self.angles_dic[ffi_num]["orbit"]) not in self.orbit_skip):
                     self.files.append(filename)
@@ -288,7 +288,7 @@ class StarDataset(Dataset):
         angles = self.angles_dic[ffi_num]
         orbit = angles['orbit']
 
-        img_arr = np.load(file_path, mmap_mode='r')
+        img_arr = np.load(file_path, mmap_mode='r', allow_pickle=True)
 
         # random patch index
         patch_idx = torch.randint(self.num_patches, (1,)).item()
