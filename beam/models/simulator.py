@@ -149,50 +149,14 @@ class SDE():
             gfc_drift: torch.Tensor
         Returns the drift of the SDE according to classifier-free guidance
         """
-        x0, t0 = x, t
-        # Clamp time to avoid division by zero and extreme values
-        t0 = t.clamp(1e-3, 1.0 - 1e-3)
-        beta = self.beta(t0).clamp_min(1e-12)
+        sigma = self.sigma if isinstance(self.sigma, float) else self.sigma(t)
 
-        if not isinstance(self.sigma, float):
-            sigma = self.sigma(t)
-        context_mask = torch.cat([torch.zeros_like(c), torch.ones_like(c)], dim=0)
-
-        # c = torch.cat([c, c], dim=0)
-        # x = torch.cat([x, x], dim=0)
-        # t = torch.cat([t, t], dim=0)
-
-        #v param:
+        # v param
         gfc_vector_field = self.velocity_field(x, c, t)
         gfc_score = self.score(x, c, t)
 
-        # if self.mode == "score":
-        #     ##FIX THIS 
-        #     vf_output = self.flow_model(x, c, t, context_mask)
-        #     conditional_vector_field, unconditional_vector_field = vf_output.chunk(2, dim=0)
-        #     gfc_vector_field = (1-self.guidance_value) * unconditional_vector_field + self.guidance_value * conditional_vector_field
-
-        #     score_output = self.score_model(x, c, t, context_mask)
-        #     conditional_score, unconditional_score = score_output.chunk(2, dim=0)
-        #     gfc_score = (1-self.guidance_value )* unconditional_score + self.guidance_value * conditional_score
-        # if self.mode == "noise":
-        #     noise_output = self.flow_model(x, c, t, context_mask)
-        #     conditional_noise, unconditional_noise = noise_output.chunk(2, dim=0)
-        #     gfc_noise = (1-self.guidance_value )* unconditional_noise + self.guidance_value * conditional_noise
-        #     gfc_score = -gfc_noise / beta 
-        #     # For noise models: convert noise to vector field
-        #     # The vector field depends on the specific alpha/beta schedule
-        #     if isinstance(self.beta, VPBeta):
-        #         # VP schedule: alpha(t) = t, beta(t) = sqrt(1-t^2)
-        #         # Vector field: (score + x)/t (t0 is already clamped)
-        #         gfc_vector_field = (gfc_score + x0)/t0
-        #     else:
-        #         # OT schedule: alpha(t) = t, beta(t) = 1-t
-        #         # Vector field: score * beta^2 * d_alpha/alpha - d_beta*beta + d_alpha/alpha * x
-        #         alpha_t = self.alpha(t0)
-        #         da = self.alpha.derivative(t0)
-        #         db = self.beta.derivative(t0)
-        #         gfc_vector_field = (beta**2 * da/alpha_t - db*beta) * gfc_score + da/alpha_t*x0
+        # TODO: SDE "noise"/"score" mode — convert a noise/score-model output to the
+        # vector field per schedule. Unfinished; generation currently uses the ODE path.
         return gfc_vector_field + 0.5*(sigma**2) * gfc_score
     
     def score(self, x: torch.Tensor, c: torch.Tensor, t: torch.Tensor):
@@ -213,9 +177,6 @@ class SDE():
             c = torch.cat([c, c], dim=0)
             x = torch.cat([x, x], dim=0)
             t = torch.cat([t, t], dim=0)
-            # score_output = self.score_model(x, c, t, context_mask)
-            # conditional_score, unconditional_score = score_output.chunk(2, dim=0)
-            # gfc_score = (1-self.guidance_value )* unconditional_score + self.guidance_value * conditional_score
             #v param:
             v_param_output = self.score_model(x, c, t, context_mask)
             conditional_v_param, unconditional_v_param = v_param_output.chunk(2, dim=0)
@@ -235,7 +196,6 @@ class SDE():
         """
         
         if c is not None:
-            x0 = x
             # Clamp time to avoid division by zero
             t0 = t.clamp(1e-3, 1.0 - 1e-3)
             beta = self.beta(t0).clamp_min(1e-12)
@@ -243,18 +203,8 @@ class SDE():
             c = torch.cat([c, c], dim=0)
             x = torch.cat([x, x], dim=0)
             t = torch.cat([t, t], dim=0)
-            # vf_output = self.flow_model(x, c, t, context_mask)  
-            # conditional_vector_field, unconditional_vector_field = vf_output.chunk(2, dim=0)
-            # gfc_vector_field = (1-self.guidance_value) * unconditional_vector_field + self.guidance_value * conditional_vector_field
-            # score = -gfc_vector_field/beta
-            # gfc_vector_field = (score + x0)/t0
-            # vf_output = self.flow_model(x, c, t, context_mask)  
-            # conditional_vector_field, unconditional_vector_field = vf_output.chunk(2, dim=0)
-            # gfc_vector_field = (1-self.guidance_value) * unconditional_vector_field + self.guidance_value * conditional_vector_field
-            # score = -gfc_vector_field/beta
-            # gfc_vector_field = (score + x0)/t0
             #vparam
-            vparam_output = self.flow_model(x, c, t, context_mask)  
+            vparam_output = self.flow_model(x, c, t, context_mask)
             conditional_vector_field, unconditional_vector_field = vparam_output.chunk(2, dim=0)
             v_out = (1-self.guidance_value) * unconditional_vector_field + self.guidance_value * conditional_vector_field
             gfc_vector_field = -v_out/beta
@@ -377,242 +327,6 @@ class EulerMaruyama(Simulator):
         return xs_saved, self.t[0, ret_idx]
 
         
-class PosteriorSDE():
-    f"""
-    Self contained class for sampling of prior + liklihood models
-    y is 256x256 latent light
-    x_obs is 4096x4096 observed (light+stars)
-    U: y -> 4096x4096 (linear upsample); UT: 4096x4096 -> y (downsample)
-    Stars: score on full-res residual via tiling + overlap-add
-    Light: score on y (low-res), optionally with CFG
-    Posterior score (low-res): s_L(y) - UT( s_N(x - U(y)) )
-    """
-
-    def __init__(self, star_score, light_score, t: torch.Tensor, x_obs: torch.Tensor, sigma, guidance_value: float, upscale_factor: int = 16,
-                 tile_size: int = 256, stride: int = 256, num_save: int = 1, num_corrections: int=0, corr_step_size: float=0.01,
-                 star_tile_microbatch: int = 160):
-        self.num_steps = t.shape[1]
-        self.t = t   #shape (1, num_steps)
-        self.num_save = num_save
-        self.star_score = star_score
-        self.light_score = light_score
-        self.sigma = sigma                          # float or callable sigma(t) = sqrt(1 - t^2)
-        self.guidance_value = guidance_value
-        self.x_obs = x_obs
-        self.alpha = OTAlpha()
-        self.beta  = VPBeta()
-
-        self.tile_size = tile_size                  # 256
-        self.stride    = stride     
-        self.upscale_factor = upscale_factor   
-        self.num_corrections = num_corrections              # 16
-        self.corr_step_size = corr_step_size              # 16
-        self.star_tile_microbatch = star_tile_microbatch
-
-    def _sigma_t(self, t, ref):
-        if isinstance(self.sigma, float):
-            return torch.full_like(ref, self.sigma)
-        return self.sigma(t)
-
-
-    def U(self, y):
-        #y: (B,C,256,256) -> (B,C,4096,4096)
-        return F.interpolate(y, scale_factor=self.upscale_factor, mode="bilinear", align_corners=False)
-
-    def UT(self, g_full):
-        #area pooling "inverse" of U
-        return F.interpolate(g_full, scale_factor=1.0/self.upscale_factor, mode="area")
-
-    def v_reparam(self, x, c, t, context_mask, model="star", mode="score"):
-        """
-        V-parameterization to score, assumes unit variance probability path
-        """
-        if model == "star":
-            v_param = self.star_score(x, c, t, context_mask)                  # (B,C,h,w)
-        elif model == "light":
-            v_out   = self.light_score(x, c, t, context_mask)                 # (2B,C,h,w) for CFG
-
-            v_cond, v_uncond = v_out.chunk(2, dim=0)
-            v_param = (1 - self.guidance_value) * v_uncond + self.guidance_value * v_cond
-            t, _ = t.chunk(2, dim=0)
-            x, _ = x.chunk(2, dim=0)
-        else:
-            raise ValueError("model must be 'star' or 'light'")
-        alpha = self.alpha(t)
-        beta  = self.beta(t).clamp_min(1e-12)
-        if mode == "score":
-            return -(alpha * v_param/beta +  x) 
-        elif mode == "vector_field":
-            return -v_param/beta
-        else:
-            raise ValueError("mode must be 'score' or 'vector_field'")
-
-    
-    def star_fullres_old(self, residual, c_zero, t, mode):
-        """
-        Slides window over star score/vector field to get full-res star score/vector field
-        """
-
-        B, C, H, W = residual.shape
-        T = 256
-        assert H == 4096 and W == 4096, "This simple tiler assumes 4096x4096."
-        out = torch.empty_like(residual)
-
-        for by in range(16):        # 0..15
-            for bx in range(16):    # 0..15
-                y0, x0 = by*T, bx*T
-                tile = residual[:, :, y0:y0+T, x0:x0+T]                 # (B,C,256,256)
-                g_tile = self.v_reparam(
-                    tile, c=c_zero, t=t, context_mask=torch.zeros_like(c_zero), model="star", mode=mode
-                )  # (B,C,256,256)
-                out[:, :, y0:y0+T, x0:x0+T] = g_tile
-        return out
-
-    def star_fullres(self, residual, c_zero, t, mode):
-        """
-        Slides window over star score/vector field to get full-res star score/vector field.
-        Tiles are processed in microbatches to fit GPU memory.
-        """
-        B, C, H, W = residual.shape
-        T = self.tile_size  # 256
-        assert H == 4096 and W == 4096, "tiler assumes 4096x4096"
-
-        # Reshape into tiles preserving the same order as the nested by/bx loops
-        tiles = residual.view(B, C, H // T, T, W // T, T)           # B, C, 16, T, 16, T
-        tiles = tiles.permute(0, 2, 4, 1, 3, 5).contiguous()        # B, 16, 16, C, T, T
-        tiles = tiles.view(-1, C, T, T)                            # (B*256, C, 256, 256)
-
-        g_tile_chunks = []
-        mb = self.star_tile_microbatch
-        total_tiles = tiles.shape[0]
-        for start in range(0, total_tiles, mb):
-            end = min(start + mb, total_tiles)
-            tile_mb = tiles[start:end]
-            c_mb = c_zero.expand(tile_mb.shape[0], -1, -1)
-            t_mb = t.expand(tile_mb.shape[0], *t.shape[1:])
-            cm_mb = torch.zeros(tile_mb.shape[0], *c_zero.shape[1:], device=c_zero.device, dtype=c_zero.dtype)
-
-            g_mb = self.v_reparam(tile_mb, c=c_mb, t=t_mb, context_mask=cm_mb, model="star", mode=mode)
-            g_tile_chunks.append(g_mb)
-
-        g_tiles = torch.cat(g_tile_chunks, dim=0)
-
-        out = g_tiles.view(B, H // T, W // T, C, T, T).permute(0, 3, 1, 4, 2, 5)
-        out = out.reshape(B, C, H, W)
-        return out
-
-
-
-    def score(self, y: torch.Tensor, c: torch.Tensor, t: torch.Tensor):
-        """
-        Returns low-res posterior score (B,C,256,256):
-            s_post(y,t) = s_L(y,t|c) - UT( s_N( x_obs - U(y), t ) )
-        """
-        STARMEAN = 0.08837062429384838 
-        STARSTD =  0.8176902707359797
-        LIGHTMEAN = 0.01978608595999928
-        LIGHTSTD =  0.08876927679677006
-        B = y.shape[0]
-
-        y_up = self.U(y) 
-        residual = (self.x_obs - y_up) * STARSTD + STARMEAN    #(B,C,4096,4096)
-
-    
-        c_zero = torch.zeros(1,1,24).to(c.device)
-        sN_full = self.star_fullres(residual, c_zero, t, mode="score")/STARSTD   #divide by STD to get score in original space
-
-        sN_low = self.UT(sN_full) #(B,C,256,256)
-
-        y = y * LIGHTSTD + LIGHTMEAN
-        x_light = torch.cat([y, y], dim=0)
-        c_light = torch.cat([c, c], dim=0)
-        t_light = torch.cat([t, t], dim=0)
-        cm_light = torch.cat([torch.zeros_like(c), torch.ones_like(c)], dim=0)
-        sL_low = self.v_reparam(x_light, c_light, t_light, cm_light, model="light", mode="score")/LIGHTSTD   #divide by STD to get score in original space
-        return sL_low - sN_low, sL_low, sN_low
-
-    def vector_field(y, c, t, score):
-        t = t.clamp(1e-3, 1.0 - 1e-3)
-        return (score + y)/t       
-        
-    def vector_field_light(self, y: torch.Tensor, c: torch.Tensor, t: torch.Tensor):
-        """
-        Returns low-res posterior vector field (B,C,256,256):
-        """
-        x_light = torch.cat([y, y], dim=0)
-        c_light = torch.cat([c, c], dim=0)
-        t_light = torch.cat([t, t], dim=0)
-        cm_light = torch.cat([torch.zeros_like(c), torch.ones_like(c)], dim=0)
-        vL_low = self.v_reparam(x_light, c_light, t_light, cm_light, model="light", mode="vector_field")
-
-        return vL_low
-    def score_light(self, y: torch.Tensor, c: torch.Tensor, t: torch.Tensor):
-        x_light = torch.cat([y, y], dim=0)
-        c_light = torch.cat([c, c], dim=0)
-        t_light = torch.cat([t, t], dim=0)
-        cm_light = torch.cat([torch.zeros_like(c), torch.ones_like(c)], dim=0)
-        sL_low = self.v_reparam(x_light, c_light, t_light, cm_light, model="light", mode="score")
-        return sL_low
-
-   
-
-    @torch.no_grad()
-    def langevin_step(self, y, c, t, h=1.0):
-        sigma_t = self._sigma_t(t, ref=y)
-        s_post  = self.score(y, c, t)   
-        drift = (0.5) * (sigma_t ** 2) * s_post * h
-        y = y + drift 
-        y = y + (sigma_t * torch.randn_like(y)) * (h ** 0.5) #stochastic update
-        return y
-
-    @torch.no_grad()
-    def simulate(self, c, y0):
-        """
-        Samples from the posterior using Euler Maruyama predictor with optional Langevin corrections
-        """
-        y = y0.clone()        
-
-        B, C, H, W = y0.shape
-        ts = self.t.expand(B, -1) #(B, num_steps)
-        if self.num_save == 1:
-            ret_idx = torch.tensor([self.num_steps - 1], device=y.device, dtype=torch.long)
-        else:
-            ret_idx = torch.linspace(0, self.num_steps-1, steps = self.num_save, device=y.device, dtype = torch.long)
-        ret_idx.clamp_(0, self.num_steps-1)
-        ys_saved = torch.empty(
-        self.num_save, B, C, H, W,
-        device=y.device,
-        dtype=y.dtype, 
-        )
-        sv_ptr = 0
-        next_save_idx = ret_idx[sv_ptr]
-        for k in tqdm(range(self.num_steps - 1)): 
-            t = ts[:, k]
-            if k == next_save_idx:
-                ys_saved[sv_ptr] = y
-                sv_ptr += 1
-                if sv_ptr < self.num_save:
-                    next_save_idx = ret_idx[sv_ptr].item()
-            #update x
-            h  = ts[:, k+1] - ts[:, k]
-            h = h.view(-1, 1, 1, 1)
-            
-            sL_low = self.score_light(y, c, t[..., None, None, None])
-            sigma_t = self._sigma_t(t, ref=y)
-            y = y +  (self.vector_field_light(y, c, t[..., None, None, None]) + sL_low*0.5*sigma_t**2) * h 
-            y = y + torch.randn_like(y) * sigma_t * (h ** 0.5) #prediction step using prior model
-
-        y_pre_correction = y.clone()
-
-        for _ in range(self.num_corrections):
-            score,_,_ = self.score(y, c, t[..., None, None, None])
-            y = y + 0.5*sigma_t**2 * score * self.corr_step_size + torch.randn_like(y) * sigma_t * (self.corr_step_size ** 0.5) #posterior correction
-
-        if (self.num_steps - 1) == next_save_idx:
-            ys_saved[-1] = y
-        return ys_saved, self.t[0, ret_idx], y_pre_correction
-
-
 class LikelihoodLangevin():
     """
     Likelihood-only Langevin sampler at full 4096x4096 resolution.

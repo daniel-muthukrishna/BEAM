@@ -91,7 +91,6 @@ class AttentionBlock(nn.Module):
         self.ffn = AttentionFFN(dim, mlp_dim)
     
     def forward(self, x, context):
-        # Process input: B, C, H, W -> B, C, H, W 
         skip_x = x #long skip connection
         x = self.groupnorm(x)
         x = self.conv1(x) # shuffles features before heads
@@ -106,8 +105,6 @@ class AttentionBlock(nn.Module):
 
         # Cross Attention Block B, Num_tokens, C -> B, Num_tokens, C
         cross_skip = x #short skip connection
-        # print(f'context shape: {context.shape}')
-        # print('\n')
         x = self.layernorm2(x)
         x = self.cross_attn(x, context)
         x = x + cross_skip
@@ -166,8 +163,6 @@ class ResidualConvBlock(nn.Module):
 
 
         xc = self.norm2(xc)
-        # print(f'xc2 shape: {xc.shape}')
-        # print('\n')
         betat, gammat = tout.view(-1, 2*self.out_channels, 1, 1).chunk(2, dim=1)
     
         xc = xc*betat + gammat #FiLM style embedding
@@ -177,7 +172,7 @@ class ResidualConvBlock(nn.Module):
         out = xc + self.skip_conv(x)
         
         # Normalize by sqrt(2) to maintain variance
-        return out / 1.414
+        return out / math.sqrt(2)
     
 class UnetDown(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, num_heads: int=None, context_dim: int=256, num_res: int=2):

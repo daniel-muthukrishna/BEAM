@@ -21,7 +21,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from beam.models.simulator import LikelihoodLangevin, PosteriorSDE
+from beam.models.simulator import LikelihoodLangevin
 from beam.models.unet import ContextUnet
 from beam.models.probabilitypath import GaussianProbabilityPath, OTAlpha, OTBeta, VPBeta
 from beam.models.interpolant import ScoreMatch, EMA

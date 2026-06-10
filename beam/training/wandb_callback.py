@@ -43,8 +43,8 @@ class WeightsAndBiasesCallback(Callback):
         log_model_freq: int = 20,
         use_wandb: bool = True,
         mode: str = "online",
-        MEAN: float = 0.01978608595999928,
-        STD: float = 0.08876927679677006,
+        MEAN: float = None,
+        STD: float = None,
     ):
         super().__init__()
         self.project_name = project_name
@@ -65,18 +65,13 @@ class WeightsAndBiasesCallback(Callback):
         if not self.use_wandb:
             return
             
-        # Generate a model name if not provided
+        config = trainer.config.copy()
         if self.model_name is None:
-            # Convert timestamp to formatted time string
             time_str = datetime.datetime.fromtimestamp(trainer.start_training_time).strftime("%Y%m%d_%H%M%S")
             model_name = config.get('wandb_model_name', 'beam-tess-model')
             self.model_name = f"{model_name}_{time_str}"
-        
-        # Add run name to config
-        config = trainer.config.copy()
+
         config["run_name"] = self.model_name
-        
-        # Initialize W&B
         init_wandb(config, self.project_name, self.mode)
 
         print(f"Initialized W&B logging with run name: {self.model_name}")

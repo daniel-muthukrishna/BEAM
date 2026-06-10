@@ -53,8 +53,7 @@ class ScoreMatch(nn.Module):
 
         #flow matching obj
         elif self.architecture == "flow":
-            flow_pred = self.nn_model(x_t, c, t, context_mask) 
-            # flow_ref, beta_t = self.probability_path.conditional_vector_field(x_t, x, t)
+            flow_pred = self.nn_model(x_t, c, t, context_mask)
             flow_ref = x - eps #specific to OT schedule
             flow_ref = flow_ref.detach()
             batch_losses = self.loss_fn(flow_pred, flow_ref)

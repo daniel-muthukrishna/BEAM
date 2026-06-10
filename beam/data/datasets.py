@@ -8,7 +8,6 @@ TESS (Transiting Exoplanet Survey Satellite) image data.
 import os
 import time
 import pickle
-import multiprocessing
 from typing import Dict, Tuple, Optional, Union, List
 
 import numpy as np
@@ -18,8 +17,6 @@ from torch.utils.data import Dataset, Subset
 import torchvision.transforms as transforms
 from PIL import Image
 from astropy.io import fits
-from collections import OrderedDict
-from scipy.ndimage import binary_dilation
 
 
 class TESSDataset(Dataset):

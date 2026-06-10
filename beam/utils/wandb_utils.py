@@ -134,8 +134,8 @@ def log_sample_images(
     step: int = None,
     name: str = "Training Set",  # "Training" or "Validation"
     ema: Optional[EMA] = None,
-    MEAN: float = 0.01978608595999928,
-    STD: float = 0.08876927679677006,
+    MEAN: Optional[float] = None,
+    STD: Optional[float] = None,
 ) -> None:
     """
     Generate samples and log them to W&B with original and generated images side by side.
@@ -150,11 +150,11 @@ def log_sample_images(
         step: Optional step number (e.g., epoch)
         name: Name for the log (e.g., "Training Set", "Validation Set")
         ema: Optional EMA model
-        mean: Mean of the data
-        std: Standard deviation of the data
+        MEAN: Mean of the data (data normalization statistic, required)
+        STD: Standard deviation of the data (data normalization statistic, required)
     """
-    MEAN = MEAN
-    STD = STD
+    if MEAN is None or STD is None:
+        raise ValueError("log_sample_images requires MEAN and STD (data normalization stats)")
     if ema is not None:
         ema.store(model)
         ema.copy_to(model)
@@ -180,8 +180,6 @@ def log_sample_images(
         )
     if len(x_gen.shape) == 3:
         x_gen = x_gen.unsqueeze(0)
-    # print(f"x_gen: {x_gen.shape}, x_gen_store: {x_gen_store.shape}, timesteps_store: {timesteps_store.shape if isinstance(timesteps_store, np.ndarray) else len(timesteps_store)}")
-    # Create side-by-side comparison for each datapoint
     comparison_images = []
     comparison_captions = []
     
