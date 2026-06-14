@@ -31,7 +31,7 @@ class FourierEncoder(nn.Module):
         freqs = t * self.weights * 2 * math.pi 
         sin_embed = torch.sin(freqs) 
         cos_embed = torch.cos(freqs) 
-        return torch.cat([sin_embed, cos_embed], dim=-1) * math.sqrt(2) # (bs, dim)
+        return torch.cat([sin_embed, cos_embed], dim=-1) * 1.414 # (bs, dim)
     
 class AttentionFFN(nn.Module):
     def __init__(self, dim, hidden_dim,):
@@ -172,7 +172,7 @@ class ResidualConvBlock(nn.Module):
         out = xc + self.skip_conv(x)
         
         # Normalize by sqrt(2) to maintain variance
-        return out / math.sqrt(2)
+        return out / 1.414
     
 class UnetDown(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, num_heads: int=None, context_dim: int=256, num_res: int=2):

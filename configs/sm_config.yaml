@@ -13,15 +13,15 @@ model:
 # Data parameters  
 data:
   angle_path: /pdo/users/djtufto/cam3/angle_full/angles_O11-116_cam_3_data_dic_full.pkl  # Path to angle data
-  ccd_folder: "/pdo/users/djtufto/cam3/tica_below_sunshade/" # Folder containing processed images
+  ccd_folder: "/pdo/users/djtufto/cam3/tica/tica_below_sunshade/" # Folder containing processed images
   image_shape: [4096, 4096] # Shape of the images
   patch_size: [256, 256] # Shape of the patches; null for no patches
   repeat_factor: 1 # Iterate repeat_factor times over the dataset each epoch
   orbit_threshold: 45 # Split training and validation at this orbit number (exclusive to train)
   orbit_max: 54 # Maximum orbit number to include in validation (inclusive to validation)
   orbit_skip: [] # Withold these orbits from training and validation
-  mean: 0 #Dataset mean (for normalization)
-  std: 1 #Dataset standard deviation (for normalization)
+  mean: 0.01 #Dataset mean (for normalization)
+  std: 0.05 #Dataset standard deviation (for normalization)
   camera_number: '3'
 ema:
   beta: 0.9999 #EMA decay rate
@@ -36,8 +36,8 @@ optimizer:
 
 # Training parameters
 training:
-  n_epoch: 300          # Maximum number of epochs
-  batch_size: 20         # Batch size
+  n_epoch: 600          # Maximum number of epochs
+  batch_size: 16         # Batch size
   patience: 50          # Early stopping patience
   mixed_precision: True # Use BF16 for training
 

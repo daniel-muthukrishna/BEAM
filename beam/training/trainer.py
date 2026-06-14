@@ -395,14 +395,21 @@ class SMTrainer:
                 # Forward pass and loss calculation
                 with torch.autocast('cuda', enabled=self.use_amp, dtype=self.mp_dtype):
                     loss_valid = self.model(x_valid, c_valid)
-                
+
                 # Update exponential moving average of loss
                 if loss_ema_valid is None:
                     loss_ema_valid = loss_valid.item()
                 else:
                     loss_ema_valid = ema_weight * loss_ema_valid + (1 - ema_weight) * loss_valid.item()
+
+        # Sync validation loss for early stopping decision
+        if self.world_size > 1:
+            loss_tensor = torch.tensor([loss_ema_valid], device=self.device)
+            dist.all_reduce(loss_tensor, op=dist.ReduceOp.AVG)
+            loss_ema_valid = loss_tensor.item()
         return loss_ema_valid
-    
+
+            
     
     def run_checkpoint(self, save_model: bool) -> bool:
         """
@@ -503,7 +510,9 @@ class SMTrainer:
                 n_datapoint=1,
                 image_shape=self.config['data_image_shape'] if self.config['data_patch_size'] is None else self.config.get('data_patch_size'),
                 name="Training Set",
-                ema=self.ema
+                ema=self.ema,
+                MEAN=self.config['data_mean'],
+                STD=self.config['data_std']
             )
             
         #     # Log validation samples
