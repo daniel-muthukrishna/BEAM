@@ -58,6 +58,7 @@ wandb/
 *.ckpt
 *.pdf
 archived/archived_runs/
+comparison_scripts/
 model_TESS_diffusion/
 model_TESS_O11-54_im64x64_multipleGPUs_earlyStop_TEST/
 

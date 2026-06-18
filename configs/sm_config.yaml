@@ -38,13 +38,13 @@ optimizer:
 training:
   n_epoch: 600          # Maximum number of epochs
   batch_size: 16         # Batch size
-  patience: 50          # Early stopping patience
+  patience: 100          # Early stopping patience
   mixed_precision: True # Use BF16 for training
 
 # Checkpoint parameters
 checkpoint:
   save_model: True       # Save model checkpoints
-  epoch_checkpoint: 50  # Save samples every N epochs
+  epoch_checkpoint: 1  # Save samples every N epochs
   checkpoint_gpu: 0      # GPU ID to use for checkpoints
   save_weights_only: False # Save only weights
   save_best_only: True # Save best model only at each checkpoint. 
@@ -56,9 +56,9 @@ wandb:
   enabled: True         # Enable W&B logging
   project: "beam-tess"   # W&B project name
   mode: "online"         # W&B mode (online, offline, disabled)
-  log_freq: 20           # Log batch metrics every N batches (higher value = less traffic)
-  log_samples_freq: 20   # Log sample images every N epochs
-  log_model_freq: 50    # Log model weights every N epochs
+  log_freq: 20          # Log batch metrics every N batches (higher value = less traffic)
+  log_samples_freq: 100   # Log sample images every N epochs
+  log_model_freq: 100    # Log model weights every N epochs
   model_name: "Camera_3_tica_star_256x256"     # Base name for the model and W&B run
   
 # Paths

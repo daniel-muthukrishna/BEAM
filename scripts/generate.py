@@ -11,7 +11,6 @@ import os
 import re
 import pickle
 import argparse
-import datetime
 
 from astropy.io import fits
 import numpy as np
@@ -231,14 +230,10 @@ def main():
     guidance_scale = config.get("generation_guidance_scale", 2.0)
     epsilon = config.get("model_epsilon", 1e-4)
 
-    # Single-chain averaging: rather than restarting N independent chains,
-    # run one longer chain and average `num_avg_snapshots` snapshots placed
-    # evenly between `avg_burn_in` and the final step.
+  
     num_avg_snapshots = int(config.get("generation_num_avg_snapshots", 1))
     avg_burn_in = int(config.get("generation_avg_burn_in", 0))
 
-    # Lazy score updates: once step index >= lazy_start_step, reuse the cached
-    # likelihood score for `lazy_interval` (= p) iterations before recomputing.
     lazy_start_step = config.get("generation_lazy_start_step", None)
     if lazy_start_step is not None:
         lazy_start_step = int(lazy_start_step)
@@ -252,7 +247,6 @@ def main():
     output_dir = args.output_dir or config["generation_output_dir"]
 
     # timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    timestamp = "sector30"
     # output_dir = os.path.join(output_dir, timestamp)
     ll_dir = os.path.join(output_dir, "likelihood_langevin")
     os.makedirs(ll_dir, exist_ok=True)
@@ -270,7 +264,6 @@ def main():
         sample = angles_ds[i]
         ffi_to_angles[angles_ds.ffi_nums[i]] = sample["x"]
 
-    # Load both models
     star_model = load_model(
         config["generation_model_path_star"],
         config,
@@ -291,10 +284,6 @@ def main():
 
     obs_dirs = args.obs_dir if isinstance(args.obs_dir, list) else [args.obs_dir]
 
-    # TICA sector folders contain cam{N}-ccd{1..4} subdirs. Enumerate FFIs by
-    # listing the cam{N}-ccd1 folder inside each sector dir. We keep one entry
-    # per (sector_dir, ccd1_filename); the other 3 quads are looked up at load
-    # time.
     obs_entries = []  # list of (sector_dir, ccd1_filename, ffi_num)
     for d in obs_dirs:
         if not os.path.isdir(d):
@@ -324,8 +313,9 @@ def main():
                 print(f"WARNING: init_dir does not exist, skipping: {d}")
                 continue
             for f in os.listdir(d):
-                if len(f) >= 26:
-                    requested.add(f[18:26])
+                parsed = parse_tica_filename(f)
+                if parsed is not None:
+                    requested.add(parsed[0])
         print(f"No --ffi-nums given; using {len(requested)} FFIs from {init_dirs}")
 
     obs_entries = [e for e in obs_entries if e[2] in requested]
@@ -339,8 +329,6 @@ def main():
     print(f"Found {num_obs_files} observation FFIs across {obs_dirs}")
 
     for sector_dir, ccd1_filename, ffi_num in obs_entries:
-        # basename used for output filenames; collapse the per-CCD suffix to
-        # a single neutral tag so the four quads share one combined name.
         basename = ccd1_filename.replace(
             f"-cam{camera}-ccd1_", f"-cam{camera}-ccdALL_"
         )
@@ -352,9 +340,7 @@ def main():
         print(f"\n{'='*60}")
         print(f"Processing FFI {ffi_num} (4 quads stitched) from {sector_dir}")
 
-        # Stitch the 4 CCD quads and trim to 4096x4096 (rows/cols deleted as
-        # in data/preprocess_all.py), then divide by 633118 to match the
-        # original observation normalization.
+        # stitching 
         x_obs_np = load_tica_observation(
             sector_dir,
             ccd1_filename,
@@ -371,7 +357,8 @@ def main():
             if not os.path.isdir(d):
                 continue
             for f in os.listdir(d):
-                if len(f) >= 26 and f[18:26] == ffi_num:
+                parsed = parse_tica_filename(f)
+                if parsed is not None and parsed[0] == ffi_num:
                     init_path = os.path.join(d, f)
                     break
             if init_path is not None:
@@ -429,68 +416,11 @@ def main():
         print(f"  Saved {ll_fits_path}")
        
 
-        # # Posterior Sampler
-        # ps_pre_light = None
-        # ps_corrected_light = None
-        # if ffi_num not in ffi_to_angles:
-        #     print(f"  WARNING: no angles for ffi={ffi_num}, skipping Posterior Sampler")
-        #     ps_clean = None
-        # else:
-        #     print("  Running Posterior Sampler ...")
-        #     c_obs = ffi_to_angles[ffi_num].to(device).unsqueeze(0)  # (1, 1, 12)
-
-        #     t = torch.linspace(epsilon, 1 - epsilon, args.num_sde_steps, device=device)
-        #     t = t.unsqueeze(0).expand(1, args.num_sde_steps)
-
-        #     posterior = PosteriorSDE(
-        #         star_score=star_unet,
-        #         light_score=light_unet,
-        #         t=t,
-        #         x_obs=x_obs,
-        #         sigma=VPBeta(),
-        #         guidance_value=guidance_scale,
-        #         upscale_factor=16,
-        #         tile_size=256,
-        #         num_save=1,
-        #         num_corrections=args.num_corrections,
-        #         corr_step_size=args.corr_step_size,
-        #         star_tile_microbatch=160,
-        #     )
-
-        #     y0 = torch.randn(1, 1, 256, 256, device=device)
-        #     with torch.no_grad():
-        #         y_saved, _, y_pre_correction = posterior.simulate(c=c_obs, y0=y0)
-
-        #     # Pre-correction: light prior output (before posterior Langevin)
-        #     y_pre_denorm = y_pre_correction * LIGHTSTD + LIGHTMEAN
-        #     ps_pre_light = posterior.U(y_pre_denorm)[0, 0].cpu().numpy()
-
-        #     # Post-correction: after posterior Langevin refinement
-        #     y_final = y_saved[-1] * LIGHTSTD + LIGHTMEAN
-        #     light_full = posterior.U(y_final)
-        #     ps_corrected_light = light_full[0, 0].cpu().numpy()
-        #     ps_clean = (x_obs - light_full)[0, 0].cpu().numpy()
-
-        #     ps_light_fits_path = os.path.join(
-        #         ps_dir, f"{basename}_posterior_scattered_light.fits"
-        #     )
-        #     fits.writeto(
-        #         ps_light_fits_path, ps_corrected_light.astype(np.float32), overwrite=True
-        #     )
-        #     print(f"  Saved {ps_light_fits_path}")
-
-        #     ps_fits_path = os.path.join(ps_dir, f"{basename}_posterior.fits")
-        #     fits.writeto(ps_fits_path, ps_clean.astype(np.float32), overwrite=True)
-        #     print(f"  Saved {ps_fits_path}")
-
         # Save comparison png
         panels = [("Observed", x_obs_np)]
         panels.append(("Preprocessed Method", x_obs_np - ll_init_light))
         if ll_corrected is not None:
             panels.append(("Likelihood Langevin", ll_corrected))
-        # if ps_clean is not None:
-        #     panels.append(("Posterior Sampler", ps_clean))
-
         fig, axes = plt.subplots(1, len(panels), figsize=(5 * len(panels), 5))
         for ax, (title, img) in zip(np.atleast_1d(axes), panels):
             ax.imshow(img, cmap="viridis", vmin=0, vmax=1)

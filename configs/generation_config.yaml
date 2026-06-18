@@ -9,7 +9,7 @@ model:
 
 data:
   angle_path: "/pdo/users/djtufto/cam3/angles/angles_O11-116_cam_3_data_dic_full.pkl"  # Path to angle data
-  ccd_folder: "/pdo/users/djtufto/cam3/tica_sector30"  # Folder containing processed images
+  ccd_folder: "/pdo/users/djtufto/cam3/tica/tica_sector30"  # Folder containing processed images
   background_path: null  # Folder containing background images
   image_shape: [4096,4096]  # Shape of the images
   patch_size: null # Shape of the patches; null for no patches
@@ -20,19 +20,19 @@ data:
 
 # Used for sampling from generate.py (likelihood-only Langevin)
 generation:
-  model_path_star: /pdo/users/djtufto/BEAM/model_outputs/cam3_256x256_star/checkpoint_epoch_final_20260402_051313.pth
+  model_path_star: /pdo/users/djtufto/BEAM/model_outputs/cam3_tica_star_256x256/checkpoint_epoch_final_20260615_053537.pth
   model_path_light: /pdo/users/djtufto/BEAM/model_outputs/conditional_noise/checkpoint_epoch_final_20251022_060121.pth
   context_len_light: 12 # Context length for the light model UNet
   batch_size: 1
   num_timesteps: 10 # Number of snapshots to save along the trajectory
-  output_dir: "model_outputs/sector30_tica/"
+  output_dir: "model_outputs/s30_tica/"
   ema: True # Use EMA weights for sampling
-  star_mean: 0 # Star model normalization mean
-  star_std: 1 # Star model normalization std
+  star_mean: 0.01 # Star model normalization mean
+  star_std: 0.05 # Star model normalization std
   light_mean: 0 # Light model normalization mean
   light_std: 1 # Light model normalization std
   guidance_scale: 1.0 # CFG guidance scale for the light model
-  num_langevin_steps: 5 # Number of Langevin iterations
+  num_langevin_steps: 50 # Number of Langevin iterations
   langevin_step_size: 0.005 # Step size for each Langevin update
   # Single-chain snapshot averaging (replaces running multiple independent chains).
   num_avg_snapshots: 1 # Number of snapshots to average along the chain
