@@ -1,10 +1,6 @@
 #!/usr/bin/env python
 """
-BEAM: Background Elimination with Advanced Machine learning - Generation Script
-
-Compares Likelihood Langevin vs Posterior Sampler on observed TESS images.
-For each observation, runs both methods and saves the clean (star) image
-as a .fits file along with a side-by-side comparison .png.
+BEAM: Generation Script
 """
 
 import os
@@ -15,7 +11,6 @@ import argparse
 from astropy.io import fits
 import numpy as np
 import torch
-import torch.nn.functional as F
 import matplotlib
 
 matplotlib.use("Agg")
@@ -25,8 +20,65 @@ from beam.models.unet import ContextUnet
 from beam.models.probabilitypath import GaussianProbabilityPath, OTAlpha, OTBeta, VPBeta
 from beam.models.interpolant import ScoreMatch, EMA
 from beam.utils.config import load_config, flatten_config
-from beam.data.datasets import TESSDataset_angles_only
-from torch.utils.data import DataLoader
+
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Compare Likelihood Langevin vs Posterior Sampler"
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="configs/generation_config.yaml",
+    )
+    parser.add_argument(
+        "--obs_dir",
+        type=str,
+        nargs="+",
+        default=["/pdo/qlp-data/tica-delivery/s0030"],
+    )
+    parser.add_argument(
+        "--init_dir",
+        type=str,
+        nargs="+",
+        default=None,
+        help="One or more directories containing preprocessed .pkl light inits "
+             "(defaults to config data.ccd_folder)",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default=None,
+        help="Output directory (defaults to config generation.output_dir)",
+    )
+
+    parser.add_argument(
+        "--device",
+        type=str,
+    )
+
+    parser.add_argument(
+        "--num-shards",
+        type=int,
+        default=1
+    )
+
+    parser.add_argument(
+        "--shard-id",
+        type=int,
+        default=0
+    )
+
+    parser.add_argument(
+        "--ffi-nums",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Only generate for these FFI numbers. "
+             "If omitted, runs on all observation FITS files in --obs_dir.",
+    )
+    return parser.parse_args()
 
 
 _TICA_RE = re.compile(
@@ -46,9 +98,7 @@ def parse_tica_filename(fits_filename):
 def load_tica_observation(sector_dir, ccd1_filename, camera,
                           rows_to_delete, columns_to_delete):
     """Load all 4 TICA CCDs for a given FFI from <sector_dir>/cam{N}-ccd{1..4}/
-    subfolders, stitch them following preprocess_all.py, then trim to 4096x4096.
-
-    Returns a (4096, 4096) float32 array (un-normalized; caller divides by 633118).
+    subfolders, stitch them following preprocess_all.py, then trim to 4096x4096..
     """
     parsed = parse_tica_filename(ccd1_filename)
     if parsed is None:
@@ -100,86 +150,17 @@ def load_tica_observation(sector_dir, ccd1_filename, camera,
     return stitched.astype(np.float32)
 
 
-def parse_args():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Compare Likelihood Langevin vs Posterior Sampler"
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default="configs/generation_config.yaml",
-        help="Path to configuration YAML file",
-    )
-    parser.add_argument(
-        "--obs_dir",
-        type=str,
-        nargs="+",
-        default=["/pdo/qlp-data/tica-delivery/s0030"],
-        help="One or more TICA sector folders, each containing "
-             "cam{N}-ccd{1..4} subfolders with per-CCD FITS files. The 4 CCDs "
-             "are stitched per FFI to form a 4096x4096 observation.",
-    )
-    parser.add_argument(
-        "--init_dir",
-        type=str,
-        nargs="+",
-        default=None,
-        help="One or more directories containing preprocessed .pkl light inits "
-             "(defaults to config data.ccd_folder)",
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default=None,
-        help="Output directory (defaults to config generation.output_dir)",
-    )
-    parser.add_argument(
-        "--num_sde_steps",
-        type=int,
-        default=500,
-        help="Number of Euler-Maruyama steps for the prior pass",
-    )
-    parser.add_argument(
-        "--num_corrections",
-        type=int,
-        default=3,
-        help="Number of posterior Langevin corrections",
-    )
-    parser.add_argument(
-        "--corr_step_size",
-        type=float,
-        default=0.01,
-        help="Step size for posterior Langevin corrections",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda:1"
 
-    )
-    parser.add_argument(
-        "--ffi-nums",
-        type=str,
-        nargs="+",
-        default=None,
-        help="Only generate for these FFI numbers (e.g. 00034520 00033682). "
-             "If omitted, runs on all observation FITS files in --obs_dir.",
-    )
-    return parser.parse_args()
-
-
-def load_model(model_path, config, device, train_loader, context_len=None):
+def load_model(model_path, config, device, context_len=12):
     """
     Load a trained model from checkpoint.
 
     Builds a ContextUnet + ScoreMatch wrapper, loads weights (optionally EMA),
     and returns the full ScoreMatch model.
     """
-    batch = next(iter(train_loader))
     unet = ContextUnet(
         in_feats=1,
-        context_len=batch["x"].shape[2] if context_len is None else context_len,
+        context_len= context_len,
         n_feat=config["model_n_feat"],
         channel_mults=config["model_channel_mults"],
         heads_at=config["model_heads_at"],
@@ -222,15 +203,11 @@ def main():
 
     STARMEAN = config["generation_star_mean"]
     STARSTD = config["generation_star_std"]
-    LIGHTMEAN = config["generation_light_mean"]
-    LIGHTSTD = config["generation_light_std"]
+
 
     num_langevin_steps = config.get("generation_num_langevin_steps", 100)
     langevin_step_size = config["generation_langevin_step_size"]
-    guidance_scale = config.get("generation_guidance_scale", 2.0)
-    epsilon = config.get("model_epsilon", 1e-4)
 
-  
     num_avg_snapshots = int(config.get("generation_num_avg_snapshots", 1))
     avg_burn_in = int(config.get("generation_avg_burn_in", 0))
 
@@ -252,28 +229,15 @@ def main():
     os.makedirs(ll_dir, exist_ok=True)
 
     # Build a minimal loader so load_model can infer conditioning shape
-    angles_ds = TESSDataset_angles_only(
-        angle_path=config["data_angle_path"],
-        camera_number=config.get("data_camera_number", "3"),
-    )
-    train_loader = DataLoader(angles_ds, batch_size=1, shuffle=False)
-
-    # Build angles lookup
-    ffi_to_angles = {}
-    for i in range(len(angles_ds)):
-        sample = angles_ds[i]
-        ffi_to_angles[angles_ds.ffi_nums[i]] = sample["x"]
-
+ 
     star_model = load_model(
         config["generation_model_path_star"],
         config,
         device,
-        train_loader,
         context_len=12,
     )
 
     star_unet = star_model.nn_model.to(device).eval()
-    # light_unet = light_model.nn_model.to(device).eval()
 
     columns_to_delete = (
         list(range(0, 44)) + list(range(2092, 2180)) + list(range(4228, 4272))
@@ -282,6 +246,7 @@ def main():
 
     camera = config.get("data_camera_number", "3")
 
+    # raw tica data from tica_delivery
     obs_dirs = args.obs_dir if isinstance(args.obs_dir, list) else [args.obs_dir]
 
     obs_entries = []  # list of (sector_dir, ccd1_filename, ffi_num)
@@ -325,8 +290,9 @@ def main():
         print(f"WARNING: requested FFIs not found in {obs_dirs}: {sorted(missing)}")
 
     obs_entries.sort(key=lambda t: (t[2], t[1]))
+    obs_entries = obs_entries[args.shard_id::args.num_shards]
     num_obs_files = len(obs_entries)
-    print(f"Found {num_obs_files} observation FFIs across {obs_dirs}")
+    print(f"Shard {args.shard_id}: Found {num_obs_files} observation FFIs across {obs_dirs}")
 
     for sector_dir, ccd1_filename, ffi_num in obs_entries:
         basename = ccd1_filename.replace(
@@ -347,11 +313,10 @@ def main():
             camera=camera,
             rows_to_delete=rows_to_delete,
             columns_to_delete=columns_to_delete,
-        ) / 633118
+        ) / 633118 / 5.3
         x_obs_np = np.ascontiguousarray(x_obs_np, dtype=np.float32)
         x_obs = torch.from_numpy(x_obs_np).to(device).view(1, 1, 4096, 4096)
 
-        # Likelihood Only -- search init across all init_dirs
         init_path = None
         for d in init_dirs:
             if not os.path.isdir(d):
@@ -366,7 +331,6 @@ def main():
         if init_path is None:
             print(f"  WARNING: no init found for ffi={ffi_num} in {init_dirs}, skipping")
             continue
-        ll_init_light = None
         print("  Running Likelihood Langevin ...")
         with open(init_path, "rb") as f:
             init_np = pickle.load(f)
@@ -385,7 +349,7 @@ def main():
             num_steps=num_langevin_steps,
             step_size=langevin_step_size,
             num_save=num_avg_snapshots,
-            star_tile_microbatch=160,
+            star_tile_microbatch=120,
             context_len=12,
             save_start_step=avg_burn_in,
             lazy_start_step=lazy_start_step,
@@ -400,8 +364,12 @@ def main():
             f"  Averaged {Xs_saved.shape[0]} snapshots at steps {save_indices}"
         )
 
-        ll_corrected = (x_obs - ll_avg)[0, 0].cpu().numpy()
-        ll_corrected_light = ll_avg[0, 0].cpu().numpy()
+        clean_m = (x_obs - ll_avg)[0,0].cpu().numpy()   # model scale for plotting
+        light_m =  ll_avg[0,0].cpu().numpy()
+
+        # rescale to original units
+        ll_corrected = clean_m * 633118 * 5.3
+        ll_corrected_light = light_m * 633118 * 5.3 
 
         ll_light_fits_path = os.path.join(
             ll_dir, f"{basename}_likelihood_scattered_light.fits"
@@ -417,10 +385,7 @@ def main():
        
 
         # Save comparison png
-        panels = [("Observed", x_obs_np)]
-        panels.append(("Preprocessed Method", x_obs_np - ll_init_light))
-        if ll_corrected is not None:
-            panels.append(("Likelihood Langevin", ll_corrected))
+        panels = [("Observed", x_obs_np), ("Preprocessed Method", x_obs_np - ll_init_light), ("Likelihood Langevin", clean_m)]
         fig, axes = plt.subplots(1, len(panels), figsize=(5 * len(panels), 5))
         for ax, (title, img) in zip(np.atleast_1d(axes), panels):
             ax.imshow(img, cmap="viridis", vmin=0, vmax=1)
@@ -433,34 +398,25 @@ def main():
         plt.close(fig)
         print(f"  Saved {png_path}")
 
-        # Save 4-panel light estimate comparison
-        light_panels = []
-        if ll_init_light is not None:
-            light_panels.append(("Preprocessed Init", ll_init_light))
-        if ll_corrected_light is not None:
-            light_panels.append(("After Likelihood Langevin", ll_corrected_light))
-        # if ps_pre_light is not None:
-        #     light_panels.append(("Prior SDE Output", ps_pre_light))
-        # if ps_corrected_light is not None:
-        #     light_panels.append(("After Posterior Correction", ps_corrected_light))
+        # Save  light estimate comparison
+        light_panels = [("Preprocessed Init", ll_init_light), ("After Likelihood Langevin", light_m)]
 
-        if light_panels:
-            fig, axes = plt.subplots(
-                1, len(light_panels), figsize=(5 * len(light_panels), 5)
-            )
-            for ax, (title, img) in zip(np.atleast_1d(axes), light_panels):
-                ax.imshow(img, cmap="viridis", vmin=0, vmax=1)
-                ax.set_title(title)
-                ax.axis("off")
-            fig.suptitle(
-                f"Light Estimates — FFI {ffi_num} (cam{camera}, stitched)",
-                fontsize=12,
-            )
-            plt.tight_layout()
-            light_png = os.path.join(output_dir, f"{basename}_light_stages.png")
-            fig.savefig(light_png, dpi=150)
-            plt.close(fig)
-            print(f"  Saved {light_png}")
+        fig, axes = plt.subplots(
+            1, len(light_panels), figsize=(5 * len(light_panels), 5)
+        )
+        for ax, (title, img) in zip(np.atleast_1d(axes), light_panels):
+            ax.imshow(img, cmap="viridis", vmin=0, vmax=1)
+            ax.set_title(title)
+            ax.axis("off")
+        fig.suptitle(
+            f"Light Estimates — FFI {ffi_num} (cam{camera}, stitched)",
+            fontsize=12,
+        )
+        plt.tight_layout()
+        light_png = os.path.join(output_dir, f"{basename}_light_stages.png")
+        fig.savefig(light_png, dpi=150)
+        plt.close(fig)
+        print(f"  Saved {light_png}")
 
     print(f"\nAll outputs saved to {output_dir}")
 
