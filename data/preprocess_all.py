@@ -335,11 +335,10 @@ class Preprocessing:
         if fits_filename.endswith((".fits", ".fits.gz")):
             arr = self.get_camera_arr(fits_filename, folder_path)
             return self.trim_and_downsample(arr, rows_to_delete, columns_to_delete)
-        # else:
-        #     print(f"{fits_filename} is not a fits file") 
+      
 
     # IMAGE PROCESSING
-    def images_processing_by_sector(self) -> None:
+    def images_processing_by_sector(self, downsample_only) -> None:
         """
         Args: None
         Returns: None
@@ -360,7 +359,7 @@ class Preprocessing:
         sector_args = []
         for sector, (folder_path, i) in sector_to_folder.items():
             sector_args.append(
-                (self, folder_path, sector, i, rows_to_delete, columns_to_delete)
+                (self, folder_path, sector, i, rows_to_delete, columns_to_delete, downsample_only)
             )
         with multiprocessing.Pool(self.num_workers) as pool:
             for result in pool.imap_unordered(Preprocessing.image_sector_worker, sector_args):
@@ -379,14 +378,16 @@ class Preprocessing:
         Returns: None
         Processes images in a given sector sequentially (no threading)
         """
-        self, folder_path, sector, i, rows_to_delete, columns_to_delete = args
+        self, folder_path, sector, i, rows_to_delete, columns_to_delete, downsample_only = args
         image_args = []
-        bg_path = os.path.join(
-            self.background_ccd_folder, f"S{int(sector):04d}_background_ccd.pkl"
-        )
-        if not os.path.exists(bg_path):
-            print(f"Warning: No background for sector {sector}. Skipping.")
-            return sector
+        # check if bg exists, if needed
+        if not downsample_only:
+            bg_path = os.path.join(
+                self.background_ccd_folder, f"S{int(sector):04d}_background_ccd.pkl"
+            )
+            if not os.path.exists(bg_path):
+                print(f"Warning: No background for sector {sector}. Skipping.")
+                return sector
         ccd1_folder = os.path.join(folder_path, f"cam{self.camera_number}-ccd1")
         if not os.path.isdir(ccd1_folder):
             print(f"Missing folder for sector {sector}: {ccd1_folder}")
@@ -405,6 +406,7 @@ class Preprocessing:
                         folder_path,
                         rows_to_delete,
                         columns_to_delete,
+                        downsample_only,
                     )
                 )
         if not image_args:
@@ -430,7 +432,7 @@ class Preprocessing:
         Returns: None
         Saves the processed image to the ccd_folder
         """
-        self, fits_filename, folder_path, rows_to_delete, columns_to_delete = args
+        self, fits_filename, folder_path, rows_to_delete, columns_to_delete, downsample_only = args
         try:
             parsed = parse_tica_filename(fits_filename)
             if parsed is None:
@@ -448,16 +450,16 @@ class Preprocessing:
             #     return  # Skip processing if image is not below sunshade
             arr = self.get_camera_arr(fits_filename, folder_path)
             arr = self.trim_and_downsample(arr, rows_to_delete, columns_to_delete)
-
-            bg_path = os.path.join(
-                self.background_ccd_folder, f"S{int(sector):04d}_background_ccd.pkl"
-            )
-            with open(bg_path, "rb") as file:
-                background_avg_image = pickle.load(file)
-            arr = arr - background_avg_image
+            if not downsample_only:
+                bg_path = os.path.join(
+                    self.background_ccd_folder, f"S{int(sector):04d}_background_ccd.pkl"
+                )
+                with open(bg_path, "rb") as file:
+                    background_avg_image = pickle.load(file)
+                arr = arr - background_avg_image
                 
             # Pixel scaling
-            scale_factor = 1 / 633118 / 5.3
+            scale_factor = 1 / 633118 
             arr *= scale_factor
             # Save debug images if requested
             if self.display_images_folder and not os.listdir(
@@ -485,13 +487,13 @@ class Preprocessing:
         except Exception as e:
             print(f"Error processing {fits_filename}: {e}")
 
-    def run(self, process_images=True, make_background=True):
+    def run(self, downsample_only, process_images=True, make_background=True):
         if make_background or process_images:
             self.load_angle_data()
         if make_background:
             self.create_backgrounds_by_sector()
         if process_images:
-            self.images_processing_by_sector()
+            self.images_processing_by_sector(downsample_only)
 
 
 def main():
@@ -508,6 +510,9 @@ def main():
         "--no_backgrounds",
         action="store_true",
         help="Do not create new background images, use existing ones only",
+    )
+    parser.add_argument(
+        "--downsample_only", action="store_true", help="Only downsample the images, do not subtract background. Still creates backgrounds unless --no_backgrounds is used."
     )
     args = parser.parse_args()
 
@@ -531,6 +536,7 @@ def main():
     )
     # CLI flags
     preproc.run(
+        downsample_only=args.downsample_only,
         make_background=not args.no_backgrounds,
         process_images=not args.no_images,
     )
