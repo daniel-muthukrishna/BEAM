@@ -74,7 +74,7 @@ class SMTrainer:
         self.max_steps = config['training_n_epoch'] *  len(self.train_loader)
             
         # Create optimizer
-        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=config['optimizer_max_lr'], weight_decay=config['optimizer_weight_decay'], fused=True)
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=config['optimizer_max_lr'], weight_decay=config['optimizer_weight_decay'], foreach=True)
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=self.max_steps, eta_min=config['optimizer_min_lr'])
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = config['optimizer_max_lr'] if config['optimizer_warmup_steps'] == 0 else self.config['optimizer_min_lr']
@@ -212,18 +212,24 @@ class SMTrainer:
         # Only save if this is the main process
         if self.rank != 0:
             return
-        # Helper function to extract FFI numbers from a dataset
+      
         def get_ffi_nums(dataset):
+            base = dataset.dataset if isinstance(dataset, Subset) else dataset
+            if not hasattr(base, 'ffi_nums'):
+                return None
             if isinstance(dataset, Subset):
-                ffi_nums = [dataset.dataset.ffi_nums[idx] for idx in dataset.indices]
-                return ffi_nums
-            else:
-                return list(dataset.ffi_nums)
-        
+                return [base.ffi_nums[idx] for idx in dataset.indices]
+            return list(base.ffi_nums)
+
         # Extract FFI numbers for each split
         training_dataset_ffis = get_ffi_nums(self.train_dataset)
         validation_dataset_ffis = get_ffi_nums(self.valid_dataset)
-        
+
+        # Skip if no FFI
+        if training_dataset_ffis is None or validation_dataset_ffis is None:
+            print("Datasets have no FFI numbers; skipping dataset-split save.")
+            return
+
         # Save to pickle files
         with open(os.path.join(self.save_dir, 'training_dataset_ffinumbers.pkl'), 'wb') as file:
             pickle.dump(training_dataset_ffis, file)
@@ -310,16 +316,6 @@ class SMTrainer:
         if self.world_size > 1 and isinstance(self.train_loader.sampler, DistributedSampler):
             self.train_loader.sampler.set_epoch(self.current_epoch)
         
-        # Apply learning rate decay
-        # for param_group in self.optimizer.param_groups:
-        #     param_group['lr'] = self.config['optimizer_max_lr'] * (
-        #         1 - self.current_epoch / self.config['training_n_epoch']
-        #     )
-        # if self.config['optimizer_warmup_steps'] > 0:
-        #     for param_group in self.optimizer.param_groups:
-        #         param_group['lr'] = self.config['optimizer_max_lr'] * (
-        #             1 - self.current_epoch / self.config['training_n_epoch']
-        #         )
         ema_weight = self.config['ema_beta']
         # Training loop
         loss_ema_train = None
@@ -338,11 +334,12 @@ class SMTrainer:
             # Move data to device
             x_train = data_batch['y'].to(self.device, non_blocking=True)
             c_train = data_batch['x'].to(self.device, non_blocking=True)
+            cam_train = data_batch['cam'].to(self.device, non_blocking=True)
 
-            
+
             # Forward pass and loss calculation
             with torch.autocast('cuda', enabled=self.use_amp, dtype=self.mp_dtype):
-                loss_train = self.model(x_train, c_train)
+                loss_train = self.model(x_train, c_train, cam=cam_train)
 
             self.scaler.scale(loss_train).backward()
             self.scaler.unscale_(self.optimizer)
@@ -391,10 +388,11 @@ class SMTrainer:
                 # Move data to device
                 x_valid = data_batch['y'].to(self.device, non_blocking=True)
                 c_valid = data_batch['x'].to(self.device, non_blocking=True)
-                
+                cam_valid = data_batch['cam'].to(self.device, non_blocking=True)
+
                 # Forward pass and loss calculation
                 with torch.autocast('cuda', enabled=self.use_amp, dtype=self.mp_dtype):
-                    loss_valid = self.model(x_valid, c_valid)
+                    loss_valid = self.model(x_valid, c_valid, cam=cam_valid)
 
                 # Update exponential moving average of loss
                 if loss_ema_valid is None:
@@ -514,18 +512,6 @@ class SMTrainer:
                 MEAN=self.config['data_mean'],
                 STD=self.config['data_std']
             )
-            
-        #     # Log validation samples
-        #     log_sample_images(
-        #         model=model,
-        #         dataloader=self.valid_loader,
-        #         device=self.device,
-        #         n_sample=1,
-        #         n_datapoint=1,
-        #         image_shape=self.config['data_image_shape'] if self.config['data_patch_size'] is None else self.config.get('data_patch_size'),
-        #         name="Validation Set",
-        #         ema=self.ema
-        #     )
         # Training loop
         for epoch in range(self.current_epoch, n_epoch):
             self.current_epoch = epoch

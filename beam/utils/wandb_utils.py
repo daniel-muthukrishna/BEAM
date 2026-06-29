@@ -163,10 +163,20 @@ def log_sample_images(
     # Get a batch of data
     data_batch = next(iter(dataloader))
     # Extract data (limited to n_datapoint)
-    x_real = data_batch['y'][:n_datapoint].to(device) 
-    c_real = data_batch['x'][:n_datapoint].to(device) 
-    ffi_nums = data_batch['ffi_num'][:n_datapoint] 
-    orbits = data_batch['orbit'][:n_datapoint] 
+    x_real = data_batch['y'][:n_datapoint].to(device)
+    c_real = data_batch['x'][:n_datapoint].to(device)
+    # Optional metadata: TESS datasets carry ffi_num/orbit; others (e.g. ImageNet)
+    # carry a class label or nothing. Build a per-sample caption that adapts.
+    ffi_nums = data_batch['ffi_num'][:n_datapoint] if 'ffi_num' in data_batch else None
+    orbits = data_batch['orbit'][:n_datapoint] if 'orbit' in data_batch else None
+    labels = data_batch['label'][:n_datapoint] if 'label' in data_batch else None
+
+    def _meta(i: int) -> str:
+        if ffi_nums is not None and orbits is not None:
+            return f"Orbit {orbits[i]}, FFI {ffi_nums[i]}"
+        if labels is not None:
+            return f"Class {int(labels[i])}"
+        return f"Sample {i}"
     # Generate samples
     with torch.no_grad():
         x_gen, x_gen_store, timesteps_store = model.simulate(
@@ -190,7 +200,7 @@ def log_sample_images(
         # Add original image
         plt.subplot(1, n_sample+1, 1)
         plt.imshow(x_real[i][0].cpu().detach().numpy()*STD + MEAN, cmap='viridis', vmin=0, vmax=1)
-        plt.title(f"Original\nOrbit {orbits[i]}, FFI {ffi_nums[i]}")
+        plt.title(f"Original\n{_meta(i)}")
         plt.axis('off')
         # Add generated samples
         for j in range(n_sample):
@@ -206,7 +216,7 @@ def log_sample_images(
         plt.close(fig)
         
         comparison_images.append(img_array)
-        comparison_captions.append(f"Orbit {orbits[i]}, FFI {ffi_nums[i]}")
+        comparison_captions.append(_meta(i))
     # Log the comparison images
     log_images(f"{name} Original vs Generated Samples", comparison_images, step=step, caption=comparison_captions)
     # Log generation process for one sample

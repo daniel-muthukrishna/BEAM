@@ -170,9 +170,7 @@ class ResidualConvBlock(nn.Module):
         
         # Add correct residual connection
         out = xc + self.skip_conv(x)
-        
-        # Normalize by sqrt(2) to maintain variance
-        return out / 1.414
+        return out
     
 class UnetDown(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, num_heads: int=None, context_dim: int=256, num_res: int=2):
@@ -246,7 +244,7 @@ class UnetUp(nn.Module):
             x: Output tensor of shape (B, out_channels, H*2, W*2)
         """
         x = self.up_conv(x) # B, in_channels, H, W -> B, out_channels, H*2, W*2
-        x = torch.cat((x, skip), 1) / 1.414 # B, out_channels, H, W -> B, 2*out_channels, H, W
+        x = torch.cat((x, skip), 1) # B, out_channels, H, W -> B, 2*out_channels, H, W 
         x = self.conv1(x, c_embed, tin, tout) # B, 2*out_channels, H, W -> B, out_channels, H, W
         x = self.attn1(x, c_attn) if isinstance(self.attn1, AttentionBlock) else self.attn1(x) # B, out_channels, H, W -> B, out_channels, H, W
         for block in self.rem_blocks:
@@ -342,19 +340,22 @@ def build_film_mlps(n_feat, channel_mults, time_dim, context_len):
 class ContextUnet(nn.Module):
     def __init__(self, in_feats, context_len,
                  n_feat=64, time_dim=128, context_dim=64,
-                 channel_mults=(1,2,2,4), heads_at=(2,3), num_res=(2,2,2,2)):
+                 channel_mults=(1,2,2,4), heads_at=(2,3), num_res=(2,2,2,2),
+                 num_cameras=4):
         super().__init__()
         self.in_feats = in_feats
         self.n_feat = n_feat
         self.channel_mults = channel_mults
         self.num_res = num_res if isinstance(num_res, list) else [num_res] * len(channel_mults)
         self.init_conv = nn.Conv2d(in_feats, n_feat, 3, 1, 1)
-        self.heads_at = heads_at 
+        self.heads_at = heads_at
 
 
 
         # Embeddings
         self.time_fourier = FourierEncoder(time_dim)
+        self.camera_embed = nn.Embedding(num_cameras, time_dim)
+        nn.init.normal_(self.camera_embed.weight, std=0.02)
         self.attn_context_embed = TokenizeContext(1, context_dim)
         self.time_mlps, self.context_mlps = build_film_mlps(
             n_feat, channel_mults, time_dim, context_len
@@ -382,7 +383,7 @@ class ContextUnet(nn.Module):
             stage_idx = len(channel_mults) - 1 - i
             num_heads = 8 if stage_idx in heads_at else None
             self.ups.append(UnetUp(prev_ch, out_ch, num_heads=num_heads,
-                                    context_dim=context_dim, num_res=self.num_res[i]))
+                                    context_dim=context_dim, num_res=self.num_res[stage_idx]))
             prev_ch = out_ch
 
         self.out = nn.Sequential(
@@ -397,10 +398,14 @@ class ContextUnet(nn.Module):
         """
         return mlp_dict[str(C)](x)
 
-    def forward(self, x, c, t, context_mask):
+    def forward(self, x, c, t, context_mask, cam=None):
         x = self.init_conv(x)
 
         fourier_t = self.time_fourier(t)
+        if cam is not None:
+            # Add the camera embedding to the time embedding; flows through the
+            # existing FiLM pathway and modulates every resolution.
+            fourier_t = fourier_t + self.camera_embed(cam)
 
         c = c.reshape(c.shape[0], c.shape[2])
         context_mask = context_mask.reshape(x.shape[0], c.shape[1])

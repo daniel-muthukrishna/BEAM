@@ -25,12 +25,22 @@ from beam.models.unet import (
     EmbedFC
 )
 from beam.models.interpolant import ScoreMatch, EMA
-from beam.models.probabilitypath import GaussianProbabilityPath
+from beam.models.probabilitypath import (
+    GaussianProbabilityPath,
+    OTAlpha,
+    OTBeta,
+    VPAlpha,
+    VPBeta,
+)
 from beam.models.simulator import (
+    Simulator,
     ODE,
     SDE,
     ODEIntegrator,
-
+    EulerMaruyama,
+    score2flow,
+    noise2flow,
+    v2flow,
 )
 
 __all__ = [
@@ -42,8 +52,16 @@ __all__ = [
     'ScoreMatch',
     'EMA',
     'GaussianProbabilityPath',
+    'OTAlpha',
+    'OTBeta',
+    'VPAlpha',
+    'VPBeta',
+    'Simulator',
     'ODE',
     'SDE',
     'ODEIntegrator',
-    'Simulator'
+    'EulerMaruyama',
+    'score2flow',
+    'noise2flow',
+    'v2flow',
 ]

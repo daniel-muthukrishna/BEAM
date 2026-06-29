@@ -84,10 +84,6 @@ class TESSDataset(Dataset):
         self.files = []
         self.ffi_nums = []
 
-        # with open(f'/pdo/users/djtufto/cam{self.camera_number}/skip.txt', 'r') as f:
-        #     skip_set = set(line.strip() for line in f)
-
-        # self.skip_count = 0
         # Load all files in the ccd_folder that have corresponding angle data 
         for filename in os.listdir(self.ccd_folder):
             ffi_num = filename[18:18+8]
@@ -136,6 +132,7 @@ class TESSDataset(Dataset):
         # image_arr = pickle.load(open(file_path, "rb"))
         angles = self.angles_dic[ffi_num]
         orbit = angles['orbit']
+        camera_num = angles['camera_num']
 
         # Prepare orbital parameters (12 values)
         params = np.array([
@@ -186,6 +183,7 @@ class TESSDataset(Dataset):
             "y": ffi_image,          # Image (64×64 or other size)
             "ffi_num": ffi_num,      # FFI identification number
             "orbit": orbit, # Orbit number
+            "cam": torch.tensor(int(camera_num) - 1, dtype=torch.long),  # 0-based camera index
             }
 
 class StarDataset(Dataset):

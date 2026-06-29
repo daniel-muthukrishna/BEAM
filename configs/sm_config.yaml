@@ -5,7 +5,10 @@ model:
   n_feat: 128           # Number of features in U-Net
   epsilon: 0.0001          # Bound t for stability
   drop_prob: 0.1         # Dropout probability for classifier-free guidance
-  architecture: "noise"   # Architecture to use for the model
+  architecture: "noise"   # Parametrization: "flow" (velocity, OT schedule, ODE sampling),
+                          # "noise" (epsilon), "score", or "v" (all VP schedule, SDE sampling).
+                          # NOTE: "noise" now trains true epsilon-prediction; the v-prediction
+                          # that this key used to select is now "v".
   channel_mults: [1,1,2,2,2] # Channel multipliers for the U-Net: layer i has n_feat*channel_mults[i] features
   heads_at: [2,3,4] # Use attention at these indices in above channel_mults
   num_res: 2 # Number of residual blocks in each layer; if int, same for all layers
