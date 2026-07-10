@@ -97,8 +97,7 @@ def parse_tica_filename(fits_filename):
 
 def load_tica_observation(sector_dir, ccd1_filename, camera,
                           rows_to_delete, columns_to_delete):
-    """Load all 4 TICA CCDs for a given FFI from <sector_dir>/cam{N}-ccd{1..4}/
-    subfolders, stitch them following preprocess_all.py, then trim to 4096x4096..
+    """Load all 4 TICA CCDs, stich and trim
     """
     parsed = parse_tica_filename(ccd1_filename)
     if parsed is None:
@@ -207,14 +206,6 @@ def main():
 
     num_langevin_steps = config.get("generation_num_langevin_steps", 100)
     langevin_step_size = config["generation_langevin_step_size"]
-
-    num_avg_snapshots = int(config.get("generation_num_avg_snapshots", 1))
-    avg_burn_in = int(config.get("generation_avg_burn_in", 0))
-
-    lazy_start_step = config.get("generation_lazy_start_step", None)
-    if lazy_start_step is not None:
-        lazy_start_step = int(lazy_start_step)
-    lazy_interval = int(config.get("generation_lazy_interval", 1))
 
     if args.init_dir:
         init_dirs = args.init_dir if isinstance(args.init_dir, list) else [args.init_dir]
@@ -348,24 +339,14 @@ def main():
             tile_size=256,
             num_steps=num_langevin_steps,
             step_size=langevin_step_size,
-            num_save=num_avg_snapshots,
             star_tile_microbatch=120,
             context_len=12,
-            save_start_step=avg_burn_in,
-            lazy_start_step=lazy_start_step,
-            lazy_interval=lazy_interval,
         )
         with torch.no_grad():
-            Xs_saved, save_indices = ll_sampler.simulate(X0)
+            ll_light = ll_sampler.simulate(X0)
 
-        # Average the snapshots collected along a single chain.
-        ll_avg = Xs_saved.mean(dim=0)
-        print(
-            f"  Averaged {Xs_saved.shape[0]} snapshots at steps {save_indices}"
-        )
-
-        clean_m = (x_obs - ll_avg)[0,0].cpu().numpy()   # model scale for plotting
-        light_m =  ll_avg[0,0].cpu().numpy()
+        clean_m = (x_obs - ll_light)[0,0].cpu().numpy()   # model scale for plotting
+        light_m =  ll_light[0,0].cpu().numpy()
 
         # rescale to original units
         ll_corrected = clean_m * 633118 * 5.3

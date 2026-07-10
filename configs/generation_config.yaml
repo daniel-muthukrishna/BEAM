@@ -18,25 +18,13 @@ data:
   mean: 0 #Dataset mean (for normalization)
   std: 1 #Dataset standard deviation (for normalization)
 
-# Used for sampling from generate.py (likelihood-only Langevin)
+# Used for sampling from generate.py 
 generation:
   model_path_star: /pdo/users/djtufto/BEAM/model_outputs/cam3_tica_star_256x256/checkpoint_epoch_final_20260615_053537.pth
-  model_path_light: /pdo/users/djtufto/BEAM/model_outputs/conditional_noise/checkpoint_epoch_final_20251022_060121.pth
-  context_len_light: 12 # Context length for the light model UNet
   batch_size: 1
-  num_timesteps: 10 # Number of snapshots to save along the trajectory
-  output_dir: "model_outputs/s30_tica/"
+  output_dir: "model_outputs/sector30/"
   ema: True # Use EMA weights for sampling
   star_mean: 0.01 # Star model normalization mean
   star_std: 0.05 # Star model normalization std
-  light_mean: 0 # Light model normalization mean
-  light_std: 1 # Light model normalization std
-  guidance_scale: 1.0 # CFG guidance scale for the light model
   num_langevin_steps: 50 # Number of Langevin iterations
-  langevin_step_size: 0.005 # Step size for each Langevin update
-  # Single-chain snapshot averaging (replaces running multiple independent chains).
-  num_avg_snapshots: 1 # Number of snapshots to average along the chain
-  avg_burn_in: 0 # Step index at which snapshot collection begins
-  # Set lazy_start_step to null to disable.
-  lazy_start_step: null
-  lazy_interval: 200
+  langevin_step_size: 0.001 # Step size for each Langevin update
