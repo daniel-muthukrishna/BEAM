@@ -2,7 +2,7 @@
 """
 BEAM: Background Elimination with Advanced Machine learning - Training Script
 
-This script trains a conditional diffusion model on TESS (Transiting Exoplanet 
+This script trains a conditional diffusion model on TESS (Transiting Exoplanet
 Survey Satellite) Full Frame Images.
 """
 
@@ -11,7 +11,6 @@ import argparse
 import datetime
 import torch
 import torch.multiprocessing as mp
-import time
 
 from beam.data.datasets import TESSDataset, StarDataset, create_train_valid_datasets_by_orbit
 from beam.models.scores import VESDE, SBD
@@ -25,41 +24,39 @@ from beam.training.callbacks import ModelCheckpoint, EarlyStopping
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Train a diffusion model on TESS images")
-    
+
     parser.add_argument('--config', type=str, default='configs/default_config.yaml',
                         help='Path to configuration YAML file')
     parser.add_argument('--resume', type=str, default=None,
                         help='Path to checkpoint to resume training from')
     parser.add_argument('--wandb', type=str, default='online',
                         help='W&B logging mode: online, offline, or disabled')
-    
+
     return parser.parse_args()
 
 
 def prepare_dataset(config):
     """
     Prepare the TESS dataset for training and validation.
-    
+
     Args:
         config: Training configuration
-        
+
     Returns:
         Tuple of (training dataset, validation dataset)
     """
     # Create dataset
     print(f"Creating TESSDataset...")
-    tess_dataset = StarDataset(
+    tess_dataset = TESSDataset(
         angle_path=config['data_angle_path'],
         ccd_folder=config['data_ccd_folder'],
         image_shape=config['data_image_shape'],
         patch_size=config.get('data_patch_size', None),
         repeat_factor=config.get('data_repeat_factor', 1),
-        orbit_skip=config.get('data_orbit_skip', []),
         mean=config.get('data_mean', 0),
         std=config.get('data_std', 1),
         camera_number=config.get('data_camera_number', '3'),
     )
-    presplit_time = time.time()
     # Create training and validation splits based on orbit number (fast, metadata only)
     print("Creating training and validation splits by orbit...")
     train_dataset, valid_dataset = create_train_valid_datasets_by_orbit(
@@ -67,24 +64,24 @@ def prepare_dataset(config):
         config["data_orbit_threshold"],
         config["data_orbit_max"],
     )
-    
+
     return train_dataset, valid_dataset
 
 
 def create_callbacks(config, args, rank):
     """
     Create training callbacks.
-    
+
     Args:
         config: Training configuration
         args: Command line arguments
         rank: GPU rank
-        
+
     Returns:
         List of callbacks
     """
     callbacks = []
-    
+
     # Only add callbacks on the main process (rank 0)
     if rank == 0:
         # Add ModelCheckpoint callback
@@ -97,7 +94,7 @@ def create_callbacks(config, args, rank):
             period=config.get('checkpoint_epoch_checkpoint', 100)
         )
         callbacks.append(checkpoint_callback)
-        
+
         # Add EarlyStopping callback
         early_stopping = EarlyStopping(
             monitor='valid_loss',
@@ -124,14 +121,14 @@ def create_callbacks(config, args, rank):
                 STD=config.get('data_std', 1)
             )
             callbacks.append(wandb_callback)
-    
+
     return callbacks
 
 
 def train_worker(rank, world_size, config, train_dataset, valid_dataset, args, resume_path=None, device=None):
     """
     Worker function for training on a single GPU.
-    
+
     Args:
         rank: GPU rank
         world_size: Total number of GPUs
@@ -145,13 +142,13 @@ def train_worker(rank, world_size, config, train_dataset, valid_dataset, args, r
     # Set device if not provided
     if device is None:
         device = torch.device(f'cuda:{rank}')
-    
-    print(f"GPU {rank}: Starting worker with {len(train_dataset)} training samples "
-          f"and {len(valid_dataset)} validation samples on device {device}")
-    
+
+    print(f"GPU {rank}: Starting worker with {len(train_dataset) // world_size} training samples "
+          f"and {len(valid_dataset) // world_size} validation samples on device {device}")
+
     # Create callbacks
     callbacks = create_callbacks(config, args, rank)
-    
+
     # Create trainer
     trainer = SMTrainer(
         config=config,
@@ -162,18 +159,18 @@ def train_worker(rank, world_size, config, train_dataset, valid_dataset, args, r
         device=device,
         callbacks=callbacks  # Pass callbacks to trainer
     )
-    
+
     # Resume from checkpoint if specified
     if resume_path:
         trainer.load_checkpoint(resume_path)
         print(f"GPU {rank}: Resumed training from {resume_path}")
-    
+
     # Train the model
     trainer.train(
         checkpoint_freq=config['checkpoint_epoch_checkpoint'],
         save_model=config['checkpoint_save_model']
     )
-    
+
     print(f"GPU {rank}: Training complete")
 
 
@@ -182,26 +179,26 @@ def main():
     print("Beginning Training")
     # Parse arguments
     args = parse_args()
-    
+
     # Load and process configuration
     config = load_config(args.config)
     flat_config = prepare_training_config(config)
-    
+
     # Get world size
     world_size = flat_config['distributed_world_size']
     print(f"Using {world_size} GPUs for training")
-    
+
     # Prepare dataset once in the main process before spawning workers
     print("Preparing dataset in main process...")
     train_dataset, valid_dataset = prepare_dataset(flat_config)
-    
+
     # Run distributed training with pre-created datasets
     run_distributed(
         train_worker,
         world_size=world_size,
         args=(flat_config, train_dataset, valid_dataset, args, args.resume),
     )
-    
+
     print("Training complete!")
 
 

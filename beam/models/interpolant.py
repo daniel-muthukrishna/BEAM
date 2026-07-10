@@ -24,6 +24,7 @@ class ScoreMatch(nn.Module):
     def forward(self, x: torch.Tensor, c: torch.Tensor, cam: torch.Tensor = None) -> torch.Tensor:
         B, _, C = c.shape
         t = torch.rand(B, 1, 1, 1, device=self.device) * (1. - self.epsilon) + self.epsilon #(BATCH_SIZE, 1, 1, 1)
+        
         #Forward
         x_t,eps, alpha_t, beta_t = self.probability_path.sample_conditional(x, t)
 
@@ -126,11 +127,10 @@ class EMA:
     """
     Maintains an exponential moving average (shadow copy) of model params.
 
-    Args
-    ----
-    model : nn.Module       
-    beta  : float = 0.9999   
-    update_after_step : int  
+    Args:
+        model : nn.Module       
+        beta  : float = 0.9999   
+        update_after_step : int  
     """
 
     def __init__(self, model, beta=0.9999, update_after_step=0):
@@ -143,7 +143,7 @@ class EMA:
 
     @torch.no_grad()
     def update(self, model):
-        """Call *once* after every optimiser step."""
+        """Called after every optimiser step."""
         self.step += 1
         if self.step < self.warmup:                # optional warm-up
             self.shadow = [p.detach().clone() for p in model.parameters()]

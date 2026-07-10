@@ -186,7 +186,7 @@ def log_sample_images(
             device,
             num_save=8,
             num_steps=3000,
-            guidance_scale=1.2
+            guidance_scale=1.0
         )
     if len(x_gen.shape) == 3:
         x_gen = x_gen.unsqueeze(0)

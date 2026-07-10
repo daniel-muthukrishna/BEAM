@@ -89,6 +89,52 @@ def score2flow(score_model: ContextUnet, path: GaussianProbabilityPath) -> Calla
             return (beta_t**2 * da/alpha_t - db*beta_t) * score + da/alpha_t*x
     return flow
 
+def noise2flow(noise_model: ContextUnet, path: GaussianProbabilityPath) -> Callable:
+    """
+    Args:
+        noise_model: ContextUnet trained to predict epsilon (the standard-normal noise x0)
+        path: GaussianProbabilityPath
+    Returns:
+        flow: Callable returning the probability-flow velocity field
+    """
+    assert isinstance(path, GaussianProbabilityPath), "Only GaussianProbabilityPath is supported"
+    alpha = path.alpha
+    beta = path.beta
+    @torch.no_grad()
+    def flow(x: torch.Tensor, c: Optional[torch.Tensor], t: torch.Tensor, context_mask: torch.Tensor):
+        eps_hat = noise_model(x, c, t, context_mask)
+        t_safe = t.clamp(1e-3, 1.0 - 1e-3)
+        a = alpha(t_safe).clamp_min(1e-12)
+        b = beta(t_safe).clamp_min(1e-12)
+        da = alpha.derivative(t_safe)
+        db = beta.derivative(t_safe)
+        return (da / a) * x - (da * b / a - db) * eps_hat
+    return flow
+
+def v2flow(v_model: ContextUnet, path: GaussianProbabilityPath) -> Callable:
+    """
+    Args:
+        v_model: ContextUnet trained to predict v = a eps - b x1
+        path: GaussianProbabilityPath
+    Returns:
+        flow: Callable returning the probability-flow velocity field
+
+    """
+    assert isinstance(path, GaussianProbabilityPath), "Only GaussianProbabilityPath is supported"
+    alpha = path.alpha
+    beta = path.beta
+    @torch.no_grad()
+    def flow(x: torch.Tensor, c: Optional[torch.Tensor], t: torch.Tensor, context_mask: torch.Tensor):
+        v = v_model(x, c, t, context_mask)
+        t_safe = t.clamp(1e-3, 1.0 - 1e-3)
+        a = alpha(t_safe)
+        b = beta(t_safe)
+        da = alpha.derivative(t_safe)
+        db = beta.derivative(t_safe)
+        denom = (a ** 2 + b ** 2).clamp_min(1e-12)
+        return ((da * a + db * b) * x + (db * a - da * b) * v) / denom
+    return flow
+
 class ODE():
     """
     Wrapper for U-net to be used as an ODE which can be solved using odeint.
@@ -96,7 +142,7 @@ class ODE():
     def __init__(self, nn_model: ContextUnet, guidance_value: float):
         self.nn_model = nn_model
         self.guidance_value = guidance_value
-    
+
     def velocity_field(self,x: torch.Tensor, c: Optional[torch.Tensor], t: torch.Tensor,):
         """
         Args:
@@ -123,107 +169,76 @@ class ODE():
 
 class SDE():
     """
-    Wrapper for U-net to be used as an SDE which can be solved using SDE Solvers.
+    Reverse time generative SDE for a Gaussian probability path.
     """
-    def __init__(self, drift_model: ContextUnet, score_model: ContextUnet, guidance_value: float, sigma, mode: str = "score", probability_path=None):
+    def __init__(self, nn_model: ContextUnet, probability_path: GaussianProbabilityPath,
+                 guidance_value: float, sigma=None, architecture: str = "v"):
+        self.nn_model = nn_model
+        self.path = probability_path
+        self.alpha = probability_path.alpha
+        self.beta = probability_path.beta
         self.guidance_value = guidance_value
-        self.flow_model = drift_model
-        self.score_model = score_model
-        self.sigma = sigma
-        self.mode = mode
-        if probability_path is not None:
-            self.beta = probability_path.beta
-            self.alpha = probability_path.alpha
+        # Default diffusion coefficient g(t) = beta(t): noise vanishes as t -> 1 (data).
+        self.sigma = sigma if sigma is not None else probability_path.beta
+        self.architecture = architecture
+
+    def _predict(self, x: torch.Tensor, c: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """Single classifier free guided network evaluation."""
+        context_mask = torch.cat([torch.zeros_like(c), torch.ones_like(c)], dim=0)
+        c = torch.cat([c, c], dim=0)
+        x = torch.cat([x, x], dim=0)
+        t = torch.cat([t, t], dim=0)
+        out = self.nn_model(x, c, t, context_mask)
+        conditional, unconditional = out.chunk(2, dim=0)
+        return (1 - self.guidance_value) * unconditional + self.guidance_value * conditional
+
+    def _velocity_and_score(self, x: torch.Tensor, c: torch.Tensor, t: torch.Tensor):
+        """Convert the network output to (velocity field u, score s)."""
+        t0 = t.clamp(1e-3, 1.0 - 1e-3)
+        a = self.alpha(t0)
+        b = self.beta(t0).clamp_min(1e-12)
+        da = self.alpha.derivative(t0)
+        db = self.beta.derivative(t0)
+        out = self._predict(x, c, t0)
+
+        if self.architecture == "noise":
+            eps_hat = out
+            score = -eps_hat / b
+            velocity = (da / a) * x - (da * b / a - db) * eps_hat
+        elif self.architecture == "score":
+            score = out
+            velocity = (da / a) * x + (b ** 2 * da / a - db * b) * score
+        elif self.architecture == "v":
+            denom = (a ** 2 + b ** 2).clamp_min(1e-12)
+            eps_hat = (b * x + a * out) / denom
+            score = -eps_hat / b
+            velocity = ((da * a + db * b) * x + (db * a - da * b) * out) / denom
         else:
-            # Default fallback
-            self.beta = VPBeta()
-            self.alpha = OTAlpha()
-    
-    def drift(self,x: torch.Tensor, c: torch.Tensor, t: torch.Tensor):
-        """
-        Args:
-            x: torch.Tensor
-            c: torch.Tensor
-            t: torch.Tensor
-        Returns:
-            gfc_drift: torch.Tensor
-        Returns the drift of the SDE according to classifier-free guidance
-        """
+            raise ValueError(
+                f"SDE architecture {self.architecture} must be one of 'noise', 'score', 'v'"
+            )
+        return velocity, score
+
+    def drift(self, x: torch.Tensor, c: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """Generative-SDE drift: u + 0.5 g(t)^2 s, with classifier-free guidance."""
         sigma = self.sigma if isinstance(self.sigma, float) else self.sigma(t)
+        velocity, score = self._velocity_and_score(x, c, t)
+        return velocity + 0.5 * (sigma ** 2) * score
 
-        # v param
-        gfc_vector_field = self.velocity_field(x, c, t)
-        gfc_score = self.score(x, c, t)
+    def velocity_field(self, x: torch.Tensor, c: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """Probability-flow velocity field component of the drift."""
+        velocity, _ = self._velocity_and_score(x, c, t)
+        return velocity
 
-        # TODO: SDE "noise"/"score" mode — convert a noise/score-model output to the
-        # vector field per schedule. Unfinished; generation currently uses the ODE path.
-        return gfc_vector_field + 0.5*(sigma**2) * gfc_score
-    
-    def score(self, x: torch.Tensor, c: torch.Tensor, t: torch.Tensor):
-        """
-        Args:
-            x: torch.Tensor
-            c: torch.Tensor
-            t: torch.Tensor
-        Returns:
-            gfc_score: torch.Tensor
-        Return the score component of the Drift
-        """
-        x0 = x
-        beta = self.beta(t).clamp_min(1e-12)
-        alpha = self.alpha(t)
-        if c is not None:
-            context_mask = torch.cat([torch.zeros_like(c), torch.ones_like(c)], dim=0)
-            c = torch.cat([c, c], dim=0)
-            x = torch.cat([x, x], dim=0)
-            t = torch.cat([t, t], dim=0)
-            #v param:
-            v_param_output = self.score_model(x, c, t, context_mask)
-            conditional_v_param, unconditional_v_param = v_param_output.chunk(2, dim=0)
-            gfc_v_param = (1-self.guidance_value )* unconditional_v_param + self.guidance_value * conditional_v_param
-            gfc_score = -(alpha*gfc_v_param + beta*x0)/beta
-        return gfc_score
-    
-    def velocity_field(self, x: torch.Tensor, c: torch.Tensor, t: torch.Tensor,):
-        """
-        Args:
-            x: torch.Tensor
-            c: torch.Tensor
-            t: torch.Tensor
-        Returns:
-            gfc_vector_field: torch.Tensor
-        Return the velocity field component of the Drift
-        """
-        
-        if c is not None:
-            # Clamp time to avoid division by zero
-            t0 = t.clamp(1e-3, 1.0 - 1e-3)
-            beta = self.beta(t0).clamp_min(1e-12)
-            context_mask = torch.cat([torch.zeros_like(c), torch.ones_like(c)], dim=0)
-            c = torch.cat([c, c], dim=0)
-            x = torch.cat([x, x], dim=0)
-            t = torch.cat([t, t], dim=0)
-            #vparam
-            vparam_output = self.flow_model(x, c, t, context_mask)
-            conditional_vector_field, unconditional_vector_field = vparam_output.chunk(2, dim=0)
-            v_out = (1-self.guidance_value) * unconditional_vector_field + self.guidance_value * conditional_vector_field
-            gfc_vector_field = -v_out/beta
-            
-        return gfc_vector_field
-    
+    def score(self, x: torch.Tensor, c: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """Score component of the drift."""
+        _, score = self._velocity_and_score(x, c, t)
+        return score
+
     def diffusion_coeff(self, x, t):
-        sigma = self.sigma
-        if not isinstance(self.sigma, float):
-            sigma = self.sigma(t)
+        sigma = self.sigma if isinstance(self.sigma, float) else self.sigma(t)
         return sigma * torch.ones_like(x)
-    
-    def probability_flow(self):
-        """
-        Returns:
-            ode: ODE
-        Returns the ODE that corresponds to the probability flow of the SDE.
-        """
-        return ODE(self.flow_model, self.guidance_value)
+
     
 
 class Simulator(ABC):
@@ -327,192 +342,3 @@ class EulerMaruyama(Simulator):
         return xs_saved, self.t[0, ret_idx]
 
         
-class LikelihoodLangevin():
-    """
-    Likelihood-only Langevin sampler at full 4096x4096 resolution.
-
-    State variable X is a light estimate (4096x4096).
-    Likelihood: P(obs | X) = Q(obs - X) where Q is the star distribution.
-    Langevin update uses grad_X log Q(obs - X) = -s_star(obs - X).
-
-    The star score is evaluated tile-wise (16x16 grid of 256x256 tiles)
-    using the v-parameterized star U-Net (unconditional, no CFG).
-    """
-
-    def __init__(self, star_score, x_obs: torch.Tensor, sigma,
-                 star_mean: float, star_std: float,
-                 tile_size: int = 256, num_steps: int = 100,
-                 step_size: float = 0.01, num_save: int = 1,
-                 star_tile_microbatch: int = 160,
-                 context_len: int = 12,
-                 save_start_step: int = 0,
-                 lazy_start_step: Optional[int] = None,
-                 lazy_interval: int = 1):
-        """
-        Args (new):
-            save_start_step: Step index at which snapshot collection begins.
-                Snapshots are placed evenly between this step and num_steps-1.
-                Use this as a "burn-in" for single-chain averaging.
-            lazy_start_step: Step index at which lazy score updates begin.
-                If None (default), the score is recomputed every iteration.
-            lazy_interval: Number of iterations between score recomputations
-                once lazy updates are active (i.e. k >= lazy_start_step).
-                A value of 1 is equivalent to disabling lazy updates.
-        """
-        self.star_score = star_score
-        self.x_obs = x_obs
-        self.sigma = sigma
-        self.star_mean = star_mean
-        self.star_std = star_std
-        self.tile_size = tile_size
-        self.num_steps = num_steps
-        self.step_size = step_size
-        self.num_save = num_save
-        self.star_tile_microbatch = star_tile_microbatch
-        self.context_len = context_len
-        self.save_start_step = max(0, min(int(save_start_step), num_steps - 1))
-        self.lazy_start_step = lazy_start_step
-        self.lazy_interval = max(1, int(lazy_interval))
-        self.alpha = OTAlpha()
-        self.beta = VPBeta()
-
-    def _sigma_t(self, t, ref):
-        if isinstance(self.sigma, float):
-            return torch.full_like(ref, self.sigma)
-        return self.sigma(t)
-
-    def _v_to_score(self, x, v_param, t):
-        """Convert v-parameterization output to score for the star model."""
-        alpha = self.alpha(t)
-        beta = self.beta(t).clamp_min(1e-12)
-        return -(alpha * v_param / beta + x)
-
-    def star_fullres(self, residual, t):
-        """
-        Evaluate star score on full 4096x4096 residual via tiling.
-        Returns the reassembled 4096x4096 score.
-        """
-        B, C, H, W = residual.shape
-        T = self.tile_size
-        assert H == 4096 and W == 4096, "tiler assumes 4096x4096"
-
-        tiles = residual.view(B, C, H // T, T, W // T, T)
-        tiles = tiles.permute(0, 2, 4, 1, 3, 5).contiguous()
-        tiles = tiles.view(-1, C, T, T)
-
-        c_zero = torch.zeros(1, 1, self.context_len, device=residual.device, dtype=residual.dtype)
-        g_tile_chunks = []
-        mb = self.star_tile_microbatch
-        for start in range(0, tiles.shape[0], mb):
-            end = min(start + mb, tiles.shape[0])
-            tile_mb = tiles[start:end]
-            n = tile_mb.shape[0]
-            c_mb = c_zero.expand(n, -1, -1)
-            t_mb = t.expand(n, *t.shape[1:])
-            cm_mb = torch.zeros(n, *c_zero.shape[1:], device=residual.device, dtype=residual.dtype)
-
-            v_param = self.star_score(tile_mb, c_mb, t_mb, cm_mb)
-            score_mb = self._v_to_score(tile_mb, v_param, t_mb)
-            g_tile_chunks.append(score_mb)
-
-        g_tiles = torch.cat(g_tile_chunks, dim=0)
-        out = g_tiles.view(B, H // T, W // T, C, T, T).permute(0, 3, 1, 4, 2, 5)
-        return out.reshape(B, C, H, W)
-
-    def likelihood_score(self, X, t):
-        """
-        Compute grad_X log P(obs | X) = grad_X log Q(obs - X) = -s_star(obs - X).
-
-        Normalizes the residual into the star model's training domain,
-        evaluates the tiled star score, then un-normalizes.
-        """
-        residual_raw = self.x_obs - X
-        residual_norm = (residual_raw - self.star_mean) / self.star_std
-
-        s_star = self.star_fullres(residual_norm, t)
-
-        # s_star is d/d(residual_norm) log Q(residual_norm).
-        # Chain rule through normalization: d/d(residual_raw) = s_star / star_std.
-        # Chain rule through subtraction: d/dX = -d/d(residual_raw).
-        return -s_star / self.star_std
-
-    @torch.no_grad()
-    def simulate(self, X0):
-        """
-        Run Langevin dynamics on the likelihood P(obs | X) = Q(obs - X).
-
-        Args:
-            X0: (B, 1, 4096, 4096) initial light estimate
-
-        Returns:
-            (Xs_saved, step_indices): saved snapshots and their step numbers
-        """
-        X = X0.clone()
-        B, C, H, W = X0.shape
-        h = float(self.step_size)
-
-        # Snapshots are placed evenly between save_start_step and num_steps-1.
-        # With save_start_step=0 this reproduces the previous behaviour.
-        if self.num_save <= 1:
-            save_at = {self.num_steps - 1}
-        else:
-            save_at = set(
-                torch.linspace(
-                    self.save_start_step,
-                    self.num_steps - 1,
-                    self.num_save,
-                    dtype=torch.long,
-                ).tolist()
-            )
-
-        Xs_saved = torch.empty(self.num_save, B, C, H, W, device=X.device, dtype=X.dtype)
-        sv_ptr = 0
-
-        # Fixed time near t=1 (refining a near-clean image, not denoising from noise)
-        t_fixed = torch.tensor(0.99, device=X.device).view(1, 1, 1, 1)
-        sigma_t = self._sigma_t(t_fixed, ref=X)
-
-        cached_grad = None
-        steps_since_refresh = 0
-        for k in tqdm(range(self.num_steps)):
-            if k in save_at and sv_ptr < self.num_save:
-                Xs_saved[sv_ptr] = X
-                sv_ptr += 1
-
-            lazy_active = (
-                self.lazy_start_step is not None and k >= self.lazy_start_step
-            )
-            if (
-                cached_grad is None
-                or not lazy_active
-                or steps_since_refresh >= self.lazy_interval
-            ):
-                grad = self.likelihood_score(X, t_fixed)
-                cached_grad = grad
-                steps_since_refresh = 1
-                refreshed = True
-            else:
-                grad = cached_grad
-                steps_since_refresh += 1
-                refreshed = False
-
-            drift = 0.5 * sigma_t ** 2 * grad * h
-            # noise = sigma_t * (h ** 0.5) * torch.randn_like(X)
-            print(
-                f"  step {k:4d} | |score|={grad.abs().mean().item():.3e} "
-                f"| |drift|={drift.abs().mean().item():.3e} "
-                # f"| |noise|={noise.abs().mean().item():.3e}"
-                f" | score={'fresh' if refreshed else 'cached'}"
-            )
-            # X = X + drift  + noise 
-            X = X + drift 
-        if sv_ptr < self.num_save:
-            Xs_saved[-1] = X
-
-        step_indices = sorted(save_at)
-        return Xs_saved, step_indices
-
-
-
-
-    

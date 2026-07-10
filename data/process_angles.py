@@ -43,11 +43,13 @@ def process_angles(
     if not raw_angles_file_paths:
         print(f"Warning: No .out files found in {raw_angles_folder}!")
 
-    camera_number = str(camera_number)
-    eel_idx = 7 + (int(camera_number) - 1) * 2
-    eaz_idx = 8 + (int(camera_number) - 1) * 2
-    mel_idx = 5 + (int(camera_number) - 1) * 2
-    maz_idx = 6 + (int(camera_number) - 1) * 2
+    #which cameras... all for cameras 1-4
+    if isinstance(camera_number, (list, tuple)):
+        cameras = [str(c) for c in camera_number]
+    elif str(camera_number).lower() == "all":
+        cameras = ["1", "2", "3", "4"]
+    else:
+        cameras = [str(camera_number)]
     data_dic = {}
 
     def deg_to_rad(value):
@@ -59,6 +61,18 @@ def process_angles(
     def dist_scaled_inverse_sqrd(value):
         return round(1 / (value / 50) ** 2, 5)
 
+    def camera_cols(arr, cam):
+        """Per-camera Earth/Moon el/az columns.
+        Indexing specific to current *altaz.out files
+        """
+        n = int(cam)
+        return {
+            "E" + cam + "el": deg_to_rad(arr[7 + (n - 1) * 2]),
+            "E" + cam + "az": deg_to_rad(arr[8 + (n - 1) * 2]),
+            "M" + cam + "el": deg_to_rad(arr[15 + (n - 1) * 2]),
+            "M" + cam + "az": deg_to_rad(arr[16 + (n - 1) * 2]),
+        }
+
     for file_path in raw_angles_file_paths:
         orbit = os.path.basename(file_path).split("_")[0][1:]
         with open(file_path, "r") as file:
@@ -69,7 +83,7 @@ def process_angles(
                 arr = [float(arr[i]) if i > 0 else str(arr[i]) for i in range(len(arr))]
                 ffi = arr[0]
 
-                data_dic[ffi] = {
+                entry = {
                     "ffi": ffi,
                     "orbit": str(orbit),
                     "1/ED": dist_scaled_inverse(arr[1]),
@@ -80,12 +94,11 @@ def process_angles(
                     "Eaz": deg_to_rad(arr[4]),
                     "Mel": deg_to_rad(arr[5]),
                     "Maz": deg_to_rad(arr[6]),
-                    "E" + camera_number + "el": deg_to_rad(arr[eel_idx]),
-                    "E" + camera_number + "az": deg_to_rad(arr[eaz_idx]),
-                    "M" + camera_number + "el": deg_to_rad(arr[mel_idx]),
-                    "M" + camera_number + "az": deg_to_rad(arr[maz_idx]),
                     "below_sunshade": arr[3] < -5.0 and arr[5] < -5.0,
                 }
+                for cam in cameras:
+                    entry.update(camera_cols(arr, cam))
+                data_dic[ffi] = entry
 
     print(f"Dataset size: {len(data_dic)}")
 
@@ -119,7 +132,7 @@ def main() -> None:
     )
     parser.add_argument("--orbit_start", type=int, help="First orbit number to process")
     parser.add_argument("--orbit_end", type=int, help="Last orbit number to process")
-    parser.add_argument("--camera_number", type=str, default="3", help="Camera number, 1 through 4")
+    parser.add_argument("--camera_number", type=str, default="3", help="Camera number 1-4, or 'all' to store every camera's columns in one dic")
     parser.add_argument(
         "--skip_orbits",
         type=int,

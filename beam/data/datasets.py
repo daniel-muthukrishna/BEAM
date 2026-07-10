@@ -37,7 +37,7 @@ class TESSDataset(Dataset):
     ):
         start_time = time.time()
         # Define paths and parameters
-        self.ccd_folder = ccd_folder
+        self.ccd_folders = list(ccd_folder) if isinstance(ccd_folder, (list, tuple)) else [ccd_folder]
         self.image_shape = image_shape
         self.angle_path = angle_path
 
@@ -63,37 +63,24 @@ class TESSDataset(Dataset):
     
         # Load orbital parameter dictionary
         self.angles_dic = pickle.load(open(self.angle_path, "rb"))
-        # Use for med npy
-        # self.MEAN = 0.1154092
-        # self.STD =  0.2346011
-        #use for small npy
-        # self.MEAN = 0.65187982
-        # self.STD =  1.10163832
-        #full
-        # self.MEAN = 0.1099859
-        # self.STD =  0.8313040
-        #use for backgrounds
-        # self.MEAN = 0.08837062429384838 
-        # self.STD =  0.8176902707359797
-        #256x256
         self.MEAN = mean
         self.STD = std
         
         # Find all valid image files that have corresponding angle data
         # store files for use in __getitem__
-        self.files = []
+        self.files = []        # full image paths
         self.ffi_nums = []
-
-        # Load all files in the ccd_folder that have corresponding angle data 
-        for filename in os.listdir(self.ccd_folder):
-            ffi_num = filename[18:18+8]
-            if ffi_num in self.angles_dic.keys():
-                self.files.append(filename)
-                self.ffi_nums.append(ffi_num)
-                self.length += 1
-        # Convert to tuples to prevent reordering
-        # self.files = tuple(self.files)
-        # self.ffi_nums = tuple(self.ffi_nums)
+        self.cameras = []      
+        for folder in self.ccd_folders:
+            print(len(os.listdir(folder)))
+            for filename in os.listdir(folder):
+                ffi_num, camera = parse_ffi_camera(filename)
+                if ffi_num in self.angles_dic.keys():
+                    self.files.append(os.path.join(folder, filename))
+                    self.ffi_nums.append(ffi_num)
+                    self.cameras.append(camera)
+                    self.length += 1
+      
         
         end_time = time.time()
         print(f"Dataset built with {self.length} samples in {end_time - start_time:.2f} seconds")
@@ -123,25 +110,22 @@ class TESSDataset(Dataset):
                 - ffi_num: FFI identification number
                 - orbit: Orbit number
         """
-        file_path = os.path.join(self.ccd_folder, self.files[idx])
+        file_path = self.files[idx]  # already a full path
         ffi_num = self.ffi_nums[idx]
-        file_name = self.files[idx]
-        
+        camera = self.cameras[idx]   #"1".."4"
 
         # Load image data
-        # image_arr = pickle.load(open(file_path, "rb"))
         angles = self.angles_dic[ffi_num]
         orbit = angles['orbit']
-        camera_num = angles['camera_num']
 
-        # Prepare orbital parameters (12 values)
+        # Prepare orbital parameters (12 values), using this sample's camera columns
         params = np.array([
-            angles['1/ED'], angles['1/MD'], 
-            angles['1/ED^2'], angles['1/MD^2'], 
-            angles['Eel'], angles['Eaz'], 
-            angles['Mel'], angles['Maz'], 
-            angles['E' + self.camera_number + 'el'], angles['E' + self.camera_number + 'az'], 
-            angles['M' + self.camera_number + 'el'], angles['M' + self.camera_number + 'az']
+            angles['1/ED'], angles['1/MD'],
+            angles['1/ED^2'], angles['1/MD^2'],
+            angles['Eel'], angles['Eaz'],
+            angles['Mel'], angles['Maz'],
+            angles['E' + camera + 'el'], angles['E' + camera + 'az'],
+            angles['M' + camera + 'el'], angles['M' + camera + 'az']
         ])
         
         image_arr = pickle.load(open(file_path, "rb")) if self.patch_size is None else np.load(file_path, mmap_mode='r', allow_pickle=True)            
@@ -156,6 +140,7 @@ class TESSDataset(Dataset):
 
         ffi_image = Image.fromarray(image_arr.flatten())
         angles_image = Image.fromarray(params)
+
         # Define transformations
         transform = transforms.Compose([
             transforms.ToTensor(),
@@ -183,174 +168,24 @@ class TESSDataset(Dataset):
             "y": ffi_image,          # Image (64×64 or other size)
             "ffi_num": ffi_num,      # FFI identification number
             "orbit": orbit, # Orbit number
-            "cam": torch.tensor(int(camera_num) - 1, dtype=torch.long),  # 0-based camera index
+            "cam": torch.tensor(int(camera) - 1, dtype=torch.long),  # 0-based camera index
             }
 
-class StarDataset(Dataset):
-    """
-    Dataset for TESS (Transiting Exoplanet Survey Satellite) images and their
-    corresponding orbital parameters.
-    """
-    def __init__(
-        self,
-        angle_path: str,
-        ccd_folder: str,
-        image_shape: Tuple[int, int],
-        mean: float,
-        std: float,
-        patch_size: Optional[Tuple[int, int]] = None,
-        orbit_skip: List[int] = [],
-        repeat_factor: int = 1,
-        camera_number: str = '3',
-    ):
-        start_time = time.time()
-        # Define paths and parameters
-        self.ccd_folder = ccd_folder
-        self.image_shape = image_shape
-        self.angle_path = angle_path
-        self.length = 0
-        self.patch_size = patch_size
-        self.repeat_factor = repeat_factor
-        self.camera_number = camera_number
-
-     
-        if self.patch_size is not None:
-            assert self.image_shape[0] % self.patch_size[0] == 0, "Image shape must be divisible by patch size"
-            self.ph, self.pw = self.patch_size
-            self.patch_x = self.image_shape[0]//self.pw
-            self.patch_y = self.image_shape[1]//self.ph
-            self.num_patches = self.patch_x * self.patch_y #assume square images and patches so y = x
     
-      
-        
-    
-        # Load orbital parameter dictionary
-        self.angles_dic = pickle.load(open(self.angle_path, "rb"))
 
-        self.MEAN = mean
-        self.STD = std
-        print(self.MEAN, self.STD)
-        
-        # Find all valid image files that have corresponding angle data
-        # store files for use in __getitem__
-        self.files = []
-        self.ffi_nums = []
-
-        self.orbit_skip = set(orbit_skip)
-        
-        # Load all files in the ccd_folder that have corresponding angle data 
-        for filename in os.listdir(self.ccd_folder):
-            ffi_num = filename.split('-')[2]
-            if ffi_num in self.angles_dic.keys():
-                if (self.angles_dic[ffi_num]["below_sunshade"] and int(self.angles_dic[ffi_num]["orbit"]) not in self.orbit_skip):
-                    self.files.append(filename)
-                    self.ffi_nums.append(ffi_num)
-                    self.length += 1
-
-        # Convert to tuples to prevent reordering
-        self.files = tuple(i for idx, i in enumerate(self.files) if idx % 2 == 0)
-        self.ffi_nums = tuple(i for idx, i in enumerate(self.ffi_nums) if idx % 2 == 0)
-        self.length = len(self.files)
-        
-        end_time = time.time()
-        print(f"Dataset built with {self.length} samples in {end_time - start_time:.2f} seconds")
-
-
-    def __len__(self) -> int:
-        """Return the number of samples in the dataset."""
-        return self.length * self.repeat_factor 
-        
-    def __getitem__(self, idx: int) -> Dict[str, Union[torch.Tensor, str]]:
-        """
-        Get a sample from the dataset.
-        
-        Args:
-            idx: Index of the sample to retrieve
-            
-        Returns:
-            Dictionary with:
-                - x: Orbital parameters tensor
-                - y: Image tensor
-                - ffi_num: FFI identification number
-                - orbit: Orbit number
-        """
-        file_path = os.path.join(self.ccd_folder, self.files[idx])
-        ffi_num = self.ffi_nums[idx]
-        
-
-        # Load image data
-        # image_arr = pickle.load(open(file_path, "rb"))
-        angles = self.angles_dic[ffi_num]
-        orbit = angles['orbit']
-
-        img_arr = np.load(file_path, mmap_mode='r', allow_pickle=True)
-
-        # random patch index
-        patch_idx = torch.randint(self.num_patches, (1,)).item()
-        pr, pc = divmod(patch_idx, self.patch_x)
-        top, left = pr*self.ph, pc*self.pw
-        sl = np.s_[top:top+self.ph, left:left+self.pw]
-
-        # slices are views on the memmap; convert once to torch
-        img = torch.tensor(img_arr[sl], dtype=torch.float32)         # new tensor
-
-        # CHW
-        img = img.unsqueeze(0)
-
-        # subtract + norm
-        img.sub_(self.MEAN).div_(self.STD)
-
-        if int(orbit) > 61:
-            img.mul_(3)
-
-        # unconditional model 
-        angles_image = torch.zeros(1, 12)
-   
-        return {
-            "x": angles_image,       # Orbital parameters (1×12 vector)
-            "y": img,          # Image (64×64 or other size)
-            "ffi_num": ffi_num,      # FFI identification number
-            "orbit": orbit, # Orbit number
-            }
-
-
-class TESSDataset_angles_only(Dataset):
+def parse_ffi_camera(filename: str) -> Tuple[str, str]:
     """
-    Dataset for TESS (Transiting Exoplanet Survey Satellite) orbital parameters only.
-    """
-    def __init__(self, angle_path, camera_number: str = '2'):
-        self.angles_dic = pickle.load(open(angle_path, "rb"))
-        self.ffi_nums = list(self.angles_dic.keys())
-        self.length = len(self.ffi_nums)
-        self.camera_number = camera_number
-    
-    def __getitem__(self, idx: int) -> Dict[str, Union[torch.Tensor, str]]:
-        ffi_num = self.ffi_nums[idx]
-        angles = self.angles_dic[ffi_num]
-        params = np.array([
-            angles['1/ED'], angles['1/MD'], 
-            angles['1/ED^2'], angles['1/MD^2'], 
-            angles['Eel'], angles['Eaz'], 
-            angles['Mel'], angles['Maz'], 
-            angles['E' + self.camera_number + 'el'], angles['E' + self.camera_number + 'az'], 
-            angles['M' + self.camera_number + 'el'], angles['M' + self.camera_number + 'az']
-        ])
-        
-        angles_image = Image.fromarray(params)
-        # Define transformations
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            lambda s: s.reshape(1, angles_image.size[1])  
-        ])
+    Parse the FFI number and camera from a TICA filename, e.g.
+    'hlsp_tica_tess_ffi_s0002-o1-00006084-cam1-ccd1_tess_v01_img_processed_im256x256'
+    -> ffi_num='00006084', camera='1'.
 
-        angles_image = transform(angles_image)
-        return {
-            "x": angles_image,
-            "ffi_num": ffi_num
-        }
-    def __len__(self) -> int:
-        return self.length
-    
+    The fields are dash-separated: [..., orbit, ffi_num, camN, ccdM, ...].
+    """
+    parts = filename.split('-')
+    ffi_num = parts[2]
+    camera = parts[3].replace('cam', '')
+    return ffi_num, camera
+
 
 def embed_patch(prow, embed_dim):
     """
@@ -402,61 +237,4 @@ def create_train_valid_datasets_by_orbit(dataset: TESSDataset, orbit_threshold: 
 
 
 
-
-class TESS_4096_original_images(Dataset):
-    """
-    Dataset for raw original 4096x4096 TESS images.
-    """
-    def __init__(self):
-        self.ffi_to_fits_filepath = {}
-        
-        # Build index of fits files
-        fits_folder_paths = [f"/pdo/users/roland/SL_data/O{i}_data/" for i in range(9, 63)]
-
-        for fits_folder_path in fits_folder_paths:
-            orbit = fits_folder_path[27:29] if fits_folder_path[29] == '_' else fits_folder_path[27:28]
-            for fits_filename in os.listdir(fits_folder_path):
-                # Only include camera 3 FITS files
-                if (len(fits_filename) > 40 and 
-                    fits_filename[-7:] == 'fits.gz' and 
-                    fits_filename[27] == '3'):
-                    ffi_num = fits_filename[18:26]
-                    self.ffi_to_fits_filepath[ffi_num] = os.path.join(fits_folder_path, fits_filename)
-
-    def __len__(self) -> int:
-        return len(self.ffi_to_fits_filepath)
-
-    def __getitem__(self, ffi_num: str) -> torch.Tensor:
-        # Rows and columns to remove from the image (black areas)
-        rows_to_delete = range(2048, 2108)
-        columns_to_delete = list(range(0, 44)) + list(range(2092, 2180)) + list(range(4228, 4272))
-        
-        # Load and process image
-        image = fits.getdata(self.ffi_to_fits_filepath[ffi_num], ext=0)
-        image = np.delete(image, rows_to_delete, axis=0)
-        image = np.delete(image, columns_to_delete, axis=1)
-        image = image.astype(np.float64)
-        image *= 1/633118  # Scale values to reasonable range
-        
-        return torch.tensor(image)
-
-
-class TESS_4096_processed_images(Dataset):
-    """
-    Dataset for pre-processed 4096x4096 TESS images.
-    """
-    def __init__(self):
-        self.ffi_to_pkl_filepath = {}
-        
-        pkl_folder_path = "/pdo/users/jlupoiii/TESS/data/processed_images_im4096x4096/"
-        for pkl_filename in os.listdir(pkl_folder_path):
-            ffi_num = pkl_filename[18:26]
-            self.ffi_to_pkl_filepath[ffi_num] = os.path.join(pkl_folder_path, pkl_filename)
-
-    def __len__(self) -> int:
-        return len(self.ffi_to_pkl_filepath)
-
-    def __getitem__(self, ffi_num: str) -> torch.Tensor:
-        with open(self.ffi_to_pkl_filepath[ffi_num], 'rb') as file:
-            return pickle.load(file)
 
