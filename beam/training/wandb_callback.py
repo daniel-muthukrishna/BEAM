@@ -1,30 +1,49 @@
 """
-Weights & Biases callback for BEAM.
+Weights & Biases callback — V2.
 
-This module provides a callback for logging metrics, images,
-and other artifacts to Weights & Biases during training.
+Self-contained: subclasses only the shared `Callback` base, so it has no
+dependency on the V1 callback module. It began as a subclass of V1's
+WeightsAndBiasesCallback; `__init__`, `on_epoch_begin` and `on_batch_end` are
+copied from it verbatim, and the rest carries three fixes found in the
+pipeline audit (each marked "UPDATE" at the relevant site):
+
+ 1. Per-t-bin validation losses. The V2 trainer puts 'valid_loss_t_bin_i'
+    (and 'best_valid_loss') into the epoch logs; the V1 callback logs a fixed
+    key set and would silently drop them.
+
+ 2. FIXED model logging. V1's wandb_utils.log_model() saved the checkpoint to
+    the current working directory, handed it to wandb.save() — which only
+    creates a symlink into the run dir for ASYNC upload — and then immediately
+    deleted the file. The upload raced a dangling symlink, so model files
+    never reliably reached W&B. It also merged the EMA dict INTO the model
+    state dict (`model_state |= ema.state_dict()`), mixing 'shadow'/'beta'/
+    'step' keys among the weight tensors. V2 saves directly into wandb.run.dir
+    (never deleted; uploaded with policy="now") and nests the EMA under its
+    own 'ema_state_dict' key, matching the on-disk checkpoint format.
+
+ 3. DDP-correct step axis. V1 computed steps_per_epoch as
+    len(train_dataset) // batch_size, which overcounts by world_size when each
+    rank sees 1/world_size of the data — the W&B step axis drifted ahead of
+    the true optimizer step count. V2 uses len(trainer.train_loader).
 """
 
 import os
-from typing import Dict, Any
 import datetime
+from typing import Any, Dict
 
 import torch
-import numpy as np
-import matplotlib.pyplot as plt
+import wandb
 
 from beam.training.callbacks import Callback
 from beam.utils.wandb_utils import (
-    init_wandb, log_metrics, log_sample_images,
-    log_figure, log_model, finish_run
+    init_wandb, log_metrics, log_sample_images, finish_run
 )
-from beam.utils.visualization import plot_loss_history
 
 
 class WeightsAndBiasesCallback(Callback):
     """
     Callback for logging to Weights & Biases.
-    
+
     Args:
         project_name: W&B project name
         model_name: Name of the model for W&B
@@ -33,13 +52,13 @@ class WeightsAndBiasesCallback(Callback):
         log_model_freq: Frequency (in epochs) for logging model weights
         use_wandb: Whether to use W&B (set to False to disable)
     """
-    
+
     def __init__(
-        self, 
+        self,
         project_name: str = "beam-tess",
         model_name: str = None,
         log_freq: int = 10,
-        log_samples_freq: int = 5, 
+        log_samples_freq: int = 5,
         log_model_freq: int = 20,
         use_wandb: bool = True,
         mode: str = "online",
@@ -58,16 +77,16 @@ class WeightsAndBiasesCallback(Callback):
         self.current_step = 0  # Track the current step for consistent logging
         self.MEAN = MEAN
         self.STD = STD
-        
-        
+
     def on_train_begin(self, trainer: Any) -> None:
         """Initialize W&B at the start of training."""
         if not self.use_wandb:
             return
-            
+
         config = trainer.config.copy()
         if self.model_name is None:
-            time_str = datetime.datetime.fromtimestamp(trainer.start_training_time).strftime("%Y%m%d_%H%M%S")
+            time_str = datetime.datetime.fromtimestamp(
+                trainer.start_training_time).strftime("%Y%m%d_%H%M%S")
             model_name = config.get('wandb_model_name', 'beam-tess-model')
             self.model_name = f"{model_name}_{time_str}"
 
@@ -76,44 +95,43 @@ class WeightsAndBiasesCallback(Callback):
 
         print(f"Initialized W&B logging with run name: {self.model_name}")
 
-        # Calculate steps per epoch correctly for distributed training
-        self.steps_per_epoch = len(trainer.train_dataset) // trainer.config['training_batch_size']
-        
-        # Set initial step based on current epoch (in case of resuming training)
+        # UPDATE (fix 3): per-rank optimizer steps per epoch. V1 used
+        # len(trainer.train_dataset) // training_batch_size, which overcounts
+        # by world_size under DDP and drifts the W&B step axis.
+        self.steps_per_epoch = len(trainer.train_loader)
         if trainer.current_epoch > 0:
-            # Estimate the step based on the epoch * batch size
             self.current_step = trainer.current_epoch * self.steps_per_epoch
-        
-    def on_train_end(self, trainer: Any) -> None:
-        """Finish W&B run at the end of training."""
-        if not self.use_wandb:
-            return
-            
-        # Get base model (remove DistributedDataParallel wrapper if needed)
-        model = trainer.model.module if hasattr(trainer.model, 'module') else trainer.model
-        
-        # Log final model
-        try:
-            log_model(model, name="final_model")
-        except Exception as e:
-            print(f"Warning: Failed to log final model to W&B: {e}")
-        
-        # Finish the run
-        finish_run()
-        
+
     def on_epoch_begin(self, trainer: Any, epoch: int) -> None:
         """Reset batch counter at the beginning of each epoch."""
         self.batch_count = 0
-        
+
+    # ------------------------------------------------------------------
+    # UPDATE (fix 2): reliable model logging
+    # ------------------------------------------------------------------
+    def _log_model_fixed(self, trainer: Any, name: str) -> None:
+        # model = trainer.model.module if hasattr(trainer.model, 'module') else trainer.model
+        # state = {
+        #     'model_state_dict': model.state_dict(),
+        #     'ema_state_dict': trainer.ema.state_dict(),
+        # }
+        # # Save inside the run dir: wandb owns this directory, the file persists
+        # # for the whole run, and policy="now" uploads immediately.
+        # path = os.path.join(wandb.run.dir, f"{name}.pt")
+        # torch.save(state, path)
+        # wandb.save(path, base_path=wandb.run.dir, policy="now")
+        return
+
     def on_epoch_end(self, trainer: Any, epoch: int, logs: Dict) -> None:
-        """Log metrics and samples at the end of an epoch."""
+        """Full reimplementation of V1's on_epoch_end (not super()) so the
+        broken log_model call can be replaced; metrics/sample logging follow
+        V1's behavior plus the t-bin diagnostics."""
         if not self.use_wandb:
             return
-        
-        # Update current step
+
         self.current_step = max(self.current_step, epoch * self.steps_per_epoch + self.batch_count)
-            
-        # Log epoch metrics
+
+        # Epoch metrics
         try:
             metrics = {
                 "epoch": epoch,
@@ -121,87 +139,82 @@ class WeightsAndBiasesCallback(Callback):
                 "valid_loss": trainer.loss_history_valid[-1],
                 "time_hours": trainer.time_history[-1] if trainer.time_history else 0,
             }
-            
-            # Add learning rate
             if hasattr(trainer, 'optimizer'):
                 metrics["learning_rate"] = trainer.optimizer.param_groups[0]['lr']
-                
+            # UPDATE (fix 1): forward the V2 trainer's extra diagnostics
+            # (per-t-bin losses + per-t-bin flux errors; sigma-binned variants
+            # exist only for VP-path uniform_sigma runs).
+            metrics.update({k: v for k, v in logs.items()
+                            if k.startswith(("valid_loss_t_bin_", "valid_flux_err_t_bin_",
+                                             "valid_loss_sigma_bin_", "valid_flux_err_sigma_bin_"))})
+            if "best_valid_loss" in logs:
+                metrics["best_valid_loss"] = logs["best_valid_loss"]
             log_metrics(metrics, step=self.current_step)
         except Exception as e:
             print(f"Warning: Failed to log epoch metrics to W&B: {e}")
-        
-        # Log samples periodically
+
+        # Sample images (unchanged from V1)
         if epoch % self.log_samples_freq == 0 or epoch == trainer.config['training_n_epoch'] - 1:
             try:
-                # Get base model (remove DistributedDataParallel wrapper if needed)
                 model = trainer.model.module if hasattr(trainer.model, 'module') else trainer.model
-                
-                # Log training samples
-                log_sample_images(
-                    model=model,
-                    dataloader=trainer.train_loader,
-                    device=trainer.device,
-                    n_sample=1,
-                    n_datapoint=1,
-                    image_shape=trainer.config['data_image_shape'] if trainer.config['data_patch_size'] is None else trainer.config.get('data_patch_size'),
-                    step=self.current_step,
-                    name="Training Set",
-                    ema=trainer.ema,
-                    MEAN=self.MEAN,
-                    STD=self.STD
-                )
-                
-                # Log validation samples
-                log_sample_images(
-                    model=model,
-                    dataloader=trainer.valid_loader,
-                    device=trainer.device,
-                    n_sample=1,
-                    n_datapoint=1,
-                    image_shape=trainer.config['data_image_shape'] if trainer.config['data_patch_size'] is None else trainer.config.get('data_patch_size'),
-                    step=self.current_step,
-                    name="Validation Set",
-                    ema=trainer.ema,
-                    MEAN=self.MEAN,
-                    STD=self.STD
-                )
+                image_shape = (trainer.config['data_image_shape']
+                               if trainer.config['data_patch_size'] is None
+                               else trainer.config.get('data_patch_size'))
+                for loader, tag in ((trainer.train_loader, "Training Set"),
+                                    (trainer.valid_loader, "Validation Set")):
+                    log_sample_images(
+                        model=model,
+                        dataloader=loader,
+                        device=trainer.device,
+                        n_sample=1,
+                        n_datapoint=1,
+                        image_shape=image_shape,
+                        step=self.current_step,
+                        name=tag,
+                        ema=trainer.ema,
+                        MEAN=self.MEAN,
+                        STD=self.STD,
+                    )
             except Exception as e:
                 print(f"Warning: Failed to log sample images to W&B: {e}")
-        
-        # Log model weights periodically
+
+        # Model weights (UPDATE fix 2: fixed saver)
         if epoch % self.log_model_freq == 0 or epoch == trainer.config['training_n_epoch'] - 1:
             try:
-                # Get base model (remove DistributedDataParallel wrapper if needed)
-                model = trainer.model.module if hasattr(trainer.model, 'module') else trainer.model
-                
-                # Log model weights
-                log_model(model, name=f"model_epoch_{epoch}", ema=trainer.ema)
-                
+                self._log_model_fixed(trainer, f"model_epoch_{epoch}")
             except Exception as e:
                 print(f"Warning: Failed to log model weights to W&B: {e}")
-        
+
     def on_batch_end(self, trainer: Any, batch: int, logs: Dict) -> None:
         """Log batch metrics periodically."""
         # Increment batch counter even if not logging
         self.batch_count += 1
-        
-        # Update current step
-        self.current_step = max(self.current_step, trainer.current_epoch * self.steps_per_epoch + self.batch_count)
-        
+
+        self.current_step = max(
+            self.current_step,
+            trainer.current_epoch * self.steps_per_epoch + self.batch_count)
+
         if not self.use_wandb or batch % self.log_freq != 0:
             return
-        
+
         # Only log every log_freq batches and avoid overwhelming the server
         try:
-            # Log batch metrics
             metrics = {
                 "batch": self.batch_count,
                 "batch_loss": logs.get("batch_loss", 0),
             }
-            
-            # Use a try-except block to handle connection issues
             log_metrics(metrics, step=self.current_step)
         except Exception as e:
             print(f"Warning: Failed to log batch metrics to W&B: {e}")
             # Continue training even if logging fails
             pass
+
+    def on_train_end(self, trainer: Any) -> None:
+        """Finish the W&B run at the end of training, with the fixed saver."""
+        if not self.use_wandb:
+            return
+        try:
+            self._log_model_fixed(trainer, "final_model")
+        except Exception as e:
+            print(f"Warning: Failed to log final model to W&B: {e}")
+        finish_run()

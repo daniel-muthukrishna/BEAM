@@ -135,13 +135,45 @@ def v2flow(v_model: ContextUnet, path: GaussianProbabilityPath) -> Callable:
         return ((da * a + db * b) * x + (db * a - da * b) * v) / denom
     return flow
 
+def guided_output(
+    nn_model: ContextUnet,
+    x: torch.Tensor,
+    c: torch.Tensor,
+    t: torch.Tensor,
+    guidance_value: float,
+    cam: Optional[torch.Tensor] = None,
+):
+    """
+    One classifier-free-guided evaluation of the network.
+
+    The conditional and unconditional branches are stacked into a single batch,
+    so this costs one forward pass over 2B samples. `cam` is only forwarded when
+    it is provided, so models whose forward() has no camera argument still work.
+    """
+    context_mask = torch.cat([torch.zeros_like(c), torch.ones_like(c)], dim=0)
+    c_in = torch.cat([c, c], dim=0)
+    x_in = torch.cat([x, x], dim=0)
+    t_in = torch.cat([t, t], dim=0)
+
+    if cam is None:
+        out = nn_model(x_in, c_in, t_in, context_mask)
+    else:
+        out = nn_model(x_in, c_in, t_in, context_mask, torch.cat([cam, cam], dim=0))
+
+    conditional, unconditional = out.chunk(2, dim=0)
+    return (1 - guidance_value) * unconditional + guidance_value * conditional
+
 class ODE():
     """
     Wrapper for U-net to be used as an ODE which can be solved using odeint.
     """
-    def __init__(self, nn_model: ContextUnet, guidance_value: float):
+    def __init__(self, nn_model: ContextUnet, guidance_value: float,
+                 cam: Optional[torch.Tensor] = None):
         self.nn_model = nn_model
         self.guidance_value = guidance_value
+        # Camera index is constant along a trajectory, so it is held here rather
+        # than threaded through the simulator's per-step signature.
+        self.cam = cam
 
     def velocity_field(self,x: torch.Tensor, c: Optional[torch.Tensor], t: torch.Tensor,):
         """
@@ -155,24 +187,17 @@ class ODE():
         """
         # Clamp time to avoid numerical issues
         t_clamped = t.clamp(1e-3, 1.0 - 1e-3)
-        
-        context_mask = torch.cat([torch.zeros_like(c), torch.ones_like(c)], dim=0)
-        c = torch.cat([c, c], dim=0)
-        x = torch.cat([x, x], dim=0)
-        t_batch = torch.cat([t_clamped, t_clamped], dim=0)
-
-        batch_output = self.nn_model(x, c, t_batch, context_mask)
-        conditional_drift, unconditional_drift = batch_output.chunk(2, dim=0)
-        gfc_drift = (1-self.guidance_value) * unconditional_drift + self.guidance_value * conditional_drift
-
-        return gfc_drift
+        return guided_output(
+            self.nn_model, x, c, t_clamped, self.guidance_value, self.cam
+        )
 
 class SDE():
     """
     Reverse time generative SDE for a Gaussian probability path.
     """
     def __init__(self, nn_model: ContextUnet, probability_path: GaussianProbabilityPath,
-                 guidance_value: float, sigma=None, architecture: str = "v"):
+                 guidance_value: float, sigma=None, architecture: str = "v",
+                 cam: Optional[torch.Tensor] = None):
         self.nn_model = nn_model
         self.path = probability_path
         self.alpha = probability_path.alpha
@@ -181,16 +206,50 @@ class SDE():
         # Default diffusion coefficient g(t) = beta(t): noise vanishes as t -> 1 (data).
         self.sigma = sigma if sigma is not None else probability_path.beta
         self.architecture = architecture
+        self.cam = cam
 
     def _predict(self, x: torch.Tensor, c: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """Single classifier free guided network evaluation."""
-        context_mask = torch.cat([torch.zeros_like(c), torch.ones_like(c)], dim=0)
-        c = torch.cat([c, c], dim=0)
-        x = torch.cat([x, x], dim=0)
-        t = torch.cat([t, t], dim=0)
-        out = self.nn_model(x, c, t, context_mask)
-        conditional, unconditional = out.chunk(2, dim=0)
-        return (1 - self.guidance_value) * unconditional + self.guidance_value * conditional
+        return guided_output(self.nn_model, x, c, t, self.guidance_value, self.cam)
+
+    def _x1_and_eps(self, out: torch.Tensor, x: torch.Tensor, t: torch.Tensor):
+        """
+        Convert a guided network output at (x, t) into the implied clean image
+        x1_hat and noise eps_hat, using the parametrization the model was
+        trained with. x_t = alpha*x1 + beta*eps throughout.
+        """
+        alpha = self.alpha(t)
+        beta = self.beta(t)
+        arch = self.architecture
+
+        if arch == "v":
+            # v = alpha*eps - beta*x1; inverting the 2x2 system with x_t needs
+            # no division by alpha or beta, so this stays stable at both ends.
+            norm = (alpha**2 + beta**2).clamp_min(1e-12)
+            x1 = (alpha * x - beta * out) / norm
+            eps = (beta * x + alpha * out) / norm
+            return x1, eps
+
+        if arch == "flow":
+            # out is the velocity itself: alpha_dot*x1 + beta_dot*eps.
+            da = self.alpha.derivative(t)
+            db = self.beta.derivative(t)
+            det = alpha * db - da * beta
+            det = torch.where(det.abs() < 1e-12, torch.full_like(det, -1e-12), det)
+            eps = (alpha * out - da * x) / det
+            x1 = (beta * out - db * x) / (-det)
+            return x1, eps
+
+        if arch == "noise":
+            eps = out
+        else:  # 'score': out = grad_x log p_t(x) = -eps / beta
+            eps = -beta.clamp_min(1e-6) * out
+
+        # x1 from eps is the only inversion that divides by alpha; near t=0 it is
+        # ill-conditioned for these two parametrizations (intrinsically so — at
+        # pure noise the clean image is undetermined).
+        x1 = (x - beta * eps) / alpha.clamp_min(1e-6)
+        return x1, eps
 
     def _velocity_and_score(self, x: torch.Tensor, c: torch.Tensor, t: torch.Tensor):
         """Convert the network output to (velocity field u, score s)."""

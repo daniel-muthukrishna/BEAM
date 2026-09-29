@@ -1,8 +1,42 @@
 """
-U-Net architecture components for the diffusion model.
+U-Net architecture components for the diffusion model — V2.
 
-This module contains the building blocks of the U-Net architecture used
-in the conditional diffusion model.
+Drop-in replacement for beam/models/unet.py. Class names are unchanged
+(ContextUnet, etc.) so integration is an import swap.
+
+Summary of updates vs unet.py (each marked "UPDATE" at the relevant site):
+
+ 1. TokenizeContext now adds a learned per-parameter identity embedding to each
+    context token. Previously every scalar was projected by the same Linear(1->D)
+    with no identity, so cross-attention keys could not encode WHICH parameter a
+    token was (e.g. Moon azimuth vs Earth elevation) — only its magnitude.
+
+ 2. Learned null-context vector for classifier-free guidance. Previously the
+    unconditional branch was `c * 0`, which collides with legitimate zero values
+    of the (raw or standardized) parameters. Dropped samples now see a learned
+    vector instead.
+
+ 3. Conditioning is fused ONCE into a single embedding (time + camera + context)
+    and applied with per-block adaLN-Zero FiLM:
+      - every ResidualConvBlock owns its own modulation MLP (previously FiLM MLPs
+        were shared across all blocks with the same channel count, so equal-width
+        blocks at different depths received identical modulation),
+      - modulation is x * (1 + scale) + shift with the modulation MLP
+        zero-initialized (adaLN-Zero, from the DiT paper), so every block starts
+        as an identity w.r.t. conditioning instead of x * (random small scale),
+      - context now reaches EVERY residual block (previously only the first
+        block of each stage got context; later blocks got time only).
+
+ 4. 2D sin-cos positional embeddings are added to tokens before attention.
+    Previously attention had no positional signal beyond what conv features
+    implicitly carry, weakening any spatially-selective use of the context.
+
+ 5. Cross-attention is now behind a `use_cross_attn` flag so FiLM-only vs
+    FiLM+cross-attention can be A/B tested. When False, no cross-attention
+    parameters are created at all.
+
+ 6. The final output conv is zero-initialized (standard diffusion practice;
+    the network starts by predicting 0 and learns residuals from there).
 """
 import math
 import torch
@@ -10,8 +44,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
+
 class FourierEncoder(nn.Module):
     """
+    Unchanged from unet.py.
     Based on https://github.com/lucidrains/denoising-diffusion-pytorch/blob/main/denoising_diffusion_pytorch/karras_unet.py#L183
     """
     def __init__(self, dim: int):
@@ -27,29 +63,54 @@ class FourierEncoder(nn.Module):
         Returns:
         - embeddings: (B, dim)
         """
-        t = t.view(-1, 1) 
-        freqs = t * self.weights * 2 * math.pi 
-        sin_embed = torch.sin(freqs) 
-        cos_embed = torch.cos(freqs) 
-        return torch.cat([sin_embed, cos_embed], dim=-1) * 1.414 # (bs, dim)
-    
+        t = t.view(-1, 1)
+        freqs = t * self.weights * 2 * math.pi
+        sin_embed = torch.sin(freqs)
+        cos_embed = torch.cos(freqs)
+        return torch.cat([sin_embed, cos_embed], dim=-1) * 1.414  # (bs, dim)
+
+
+def posemb_sincos_2d(h: int, w: int, dim: int, device) -> torch.Tensor:
+    """
+    UPDATE (new): standard ViT-style 2D sin-cos positional embedding.
+    Returns (h*w, dim) float32. Added to tokens before attention so that
+    attention weights can depend on image position explicitly.
+    """
+    assert dim % 4 == 0, (
+        f"posemb_sincos_2d requires channel dim divisible by 4, got {dim}. "
+        "All stages listed in heads_at must have n_feat*mult divisible by 4."
+    )
+    y, x = torch.meshgrid(
+        torch.arange(h, device=device, dtype=torch.float32),
+        torch.arange(w, device=device, dtype=torch.float32),
+        indexing="ij",
+    )
+    quarter = dim // 4
+    omega = torch.arange(quarter, device=device, dtype=torch.float32) / max(quarter - 1, 1)
+    omega = 1.0 / (10000 ** omega)
+    y = y.flatten()[:, None] * omega[None, :]
+    x = x.flatten()[:, None] * omega[None, :]
+    return torch.cat([x.sin(), x.cos(), y.sin(), y.cos()], dim=1)  # (h*w, dim)
+
+
 class AttentionFFN(nn.Module):
-    def __init__(self, dim, hidden_dim,):
+    """Unchanged from unet.py (GeGLU feed-forward)."""
+    def __init__(self, dim, hidden_dim):
         super().__init__()
-        self.linear1 = nn.Linear(dim, hidden_dim*2)
+        self.linear1 = nn.Linear(dim, hidden_dim * 2)
         self.gelu = nn.GELU()
         self.linear2 = nn.Linear(hidden_dim, dim)
 
     def forward(self, x):
         # x: (B, seq_len, dim)
-        #GeGLU
-        data, gate = self.linear1(x).chunk(2, dim=-1) # (B, seq_len, hidden_dim) for data and gate
-        x = data * self.gelu(gate) # (B, seq_len, hidden_dim)
-
-        x = self.linear2(x) # (B, seq_len, dim)
+        data, gate = self.linear1(x).chunk(2, dim=-1)
+        x = data * self.gelu(gate)
+        x = self.linear2(x)
         return x
-    
+
+
 class SelfAttention(nn.Module):
+    """Unchanged from unet.py."""
     def __init__(self, dim, heads=4):
         super().__init__()
         self.dim = dim
@@ -59,57 +120,90 @@ class SelfAttention(nn.Module):
     def forward(self, x):
         return self.net(x, x, x, need_weights=False)[0]
 
+
 class CrossAttention(nn.Module):
+    """Unchanged from unet.py."""
     def __init__(self, dim, context_dim=128, heads=4):
         super().__init__()
         self.dim = dim
         self.context_dim = context_dim
         self.heads = heads
-        self.net = nn.MultiheadAttention(embed_dim=dim, num_heads=heads, kdim=context_dim, vdim=context_dim, batch_first=True)
+        self.net = nn.MultiheadAttention(embed_dim=dim, num_heads=heads, kdim=context_dim,
+                                         vdim=context_dim, batch_first=True)
 
     def forward(self, x, context):
         return self.net(x, context, context, need_weights=False)[0]
 
+
 class AttentionBlock(nn.Module):
-    def __init__(self, dim, context_dim, mlp_dim, heads=4):
+    """
+    UPDATE: two changes vs unet.py
+      - 2D sin-cos positional embedding added to tokens before self-attention
+        (also benefits the cross-attention queries, which follow).
+      - cross-attention is optional (use_cross_attn); when disabled the layers
+        are not created, saving parameters and compute.
+    """
+    def __init__(self, dim, context_dim, mlp_dim, heads=4, use_cross_attn=True):
         super().__init__()
         self.dim = dim
         self.context_dim = context_dim
         self.mlp_dim = mlp_dim
-        self.heads = heads  
+        self.heads = heads
+        self.use_cross_attn = use_cross_attn
 
         self.conv1 = nn.Conv2d(dim, dim, stride=1, kernel_size=1, padding=0)
         self.conv2 = nn.Conv2d(dim, dim, stride=1, kernel_size=1, padding=0)
 
         self.layernorm1 = nn.LayerNorm(dim)
-        self.layernorm2 = nn.LayerNorm(dim)
         self.layernorm3 = nn.LayerNorm(dim)
-        self.groupnorm = nn.GroupNorm(32, dim)
+        # UPDATE: min(32, dim) instead of hard-coded 32, matching ResidualConvBlock,
+        # so small-width configs don't crash.
+        self.groupnorm = nn.GroupNorm(min(32, dim), dim)
 
         self.self_attn = SelfAttention(dim, heads)
-        self.cross_attn = CrossAttention(dim, context_dim, heads)
+        if use_cross_attn:
+            self.layernorm2 = nn.LayerNorm(dim)
+            self.cross_attn = CrossAttention(dim, context_dim, heads)
         self.ffn = AttentionFFN(dim, mlp_dim)
-    
-    def forward(self, x, context):
-        skip_x = x #long skip connection
+
+        # UPDATE: cache for the positional embedding, keyed by (H, W).
+        # Plain dict (not a buffer): it is deterministic and cheap to rebuild,
+        # so it should not enter the state_dict.
+        self._pe_cache = {}
+
+    def _pos_emb(self, H: int, W: int, device) -> torch.Tensor:
+        key = (H, W, str(device))
+        pe = self._pe_cache.get(key)
+        if pe is None:
+            pe = posemb_sincos_2d(H, W, self.dim, device)
+            self._pe_cache[key] = pe
+        return pe
+
+    def forward(self, x, context=None):
+        skip_x = x  # long skip connection
         x = self.groupnorm(x)
-        x = self.conv1(x) # shuffles features before heads
+        x = self.conv1(x)  # shuffles features before heads
         B, C, H, W = x.shape
-        
-        # Self Attention Block B, C, H, W -> B, (H*W), C = B, Num_tokens, Embedding_dim -> B, Num_tokens, C
+
+        # Self Attention Block B, C, H, W -> B, (H*W), C
         x = rearrange(x, 'b c h w -> b (h w) c')
-        attn_skip = x #short skip connection
+        # UPDATE: inject explicit positional information before attention.
+        # Cast to x.dtype so bf16 autocast tensors are not silently promoted to fp32.
+        x = x + self._pos_emb(H, W, x.device).to(x.dtype).unsqueeze(0)
+
+        attn_skip = x  # short skip connection
         x = self.layernorm1(x)
         x = self.self_attn(x)
         x = x + attn_skip
 
-        # Cross Attention Block B, Num_tokens, C -> B, Num_tokens, C
-        cross_skip = x #short skip connection
-        x = self.layernorm2(x)
-        x = self.cross_attn(x, context)
-        x = x + cross_skip
+        # Cross Attention Block (UPDATE: optional)
+        if self.use_cross_attn and context is not None:
+            cross_skip = x
+            x = self.layernorm2(x)
+            x = self.cross_attn(x, context)
+            x = x + cross_skip
 
-        # GeGLU Block B, Num_tokens, C -> B, Num_tokens, C -> B, C, H, W
+        # GeGLU Block
         x = self.layernorm3(x)
         x = self.ffn(x)
         x = rearrange(x, 'b (h w) c -> b c h w', h=H, w=W)
@@ -117,19 +211,29 @@ class AttentionBlock(nn.Module):
         x = x + skip_x
 
         return x
- 
+
+
 class ResidualConvBlock(nn.Module):
     """
-    Standard ResNet-style convolutional block with residual connections.
+    UPDATE: rebuilt conditioning pathway (adaLN-Zero style).
+
+    vs unet.py:
+      - takes ONE fused conditioning embedding `emb` (time + camera + context)
+        instead of separate (c, tin, tout) tensors,
+      - owns its own modulation MLPs (film1/film2) instead of receiving
+        modulation computed by MLPs shared across all same-width blocks,
+      - modulation is x * (1 + scale) + shift with zero-initialized MLPs, so at
+        init the block ignores conditioning instead of multiplying features by
+        a random near-zero scale,
+      - because `emb` contains the context, EVERY residual block is now
+        context-conditioned (previously only the first block per stage).
     """
-    def __init__(
-        self, in_channels: int, out_channels: int
-    ) -> None:
+    def __init__(self, in_channels: int, out_channels: int, emb_dim: int) -> None:
         super().__init__()
         self.same_channels = in_channels == out_channels
         self.in_channels = in_channels
         self.out_channels = out_channels
-        
+
         self.norm1 = nn.GroupNorm(min(32, in_channels), in_channels)
         self.norm2 = nn.GroupNorm(min(32, out_channels), out_channels)
 
@@ -137,159 +241,189 @@ class ResidualConvBlock(nn.Module):
             nn.SiLU(),
             nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1),
         )
-        
         self.conv2 = nn.Sequential(
             nn.SiLU(),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1),
         )
-        self.skip_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0) if not self.same_channels else nn.Identity()
+        self.skip_conv = (nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
+                          if not self.same_channels else nn.Identity())
 
-        nn.init.zeros_(self.conv2[-1].weight) # Start Learning from Identity: resnet(x) = x
+        # UPDATE: per-block modulation MLPs, zero-initialized (adaLN-Zero).
+        self.film1 = nn.Sequential(nn.SiLU(), nn.Linear(emb_dim, 2 * in_channels))
+        self.film2 = nn.Sequential(nn.SiLU(), nn.Linear(emb_dim, 2 * out_channels))
+        nn.init.zeros_(self.film1[-1].weight)
+        nn.init.zeros_(self.film1[-1].bias)
+        nn.init.zeros_(self.film2[-1].weight)
+        nn.init.zeros_(self.film2[-1].bias)
 
-    def forward(self, x: torch.Tensor, c: torch.Tensor, tin: torch.Tensor, tout: torch.Tensor) -> torch.Tensor:
-        # x: B, in_channels, H, W
-        # c: B, context_dim if it is the first block, else time
-        # tin: B, in_channels*2
-        # tout: B, out_channels*2
-        
-        # Handle residual connection
-        xc = self.norm1(x)
+        # Start learning from identity: resnet(x) = x  (kept from unet.py; bias
+        # is now also zeroed for a clean identity at init)
+        nn.init.zeros_(self.conv2[-1].weight)
+        nn.init.zeros_(self.conv2[-1].bias)
 
-        betat, gammat = tin.view(-1, 2*self.in_channels, 1, 1).chunk(2, dim=1)
-        betac, gammac = c.view(-1, 2*self.in_channels, 1, 1).chunk(2, dim=1) if c is not None else torch.zeros_like(tin).view(-1, 2*self.in_channels, 1, 1).chunk(2, dim=1)
-    
-        xc = xc*(betac + betat) + gammac + gammat #FiLM style embedding
-        xc = self.conv1(xc)
+    def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
+        # x:   (B, in_channels, H, W)
+        # emb: (B, emb_dim) — fused time + camera + context embedding
+        scale1, shift1 = self.film1(emb).view(-1, 2 * self.in_channels, 1, 1).chunk(2, dim=1)
+        h = self.norm1(x)
+        # UPDATE: (1 + scale) convention — identity at init since scale==0.
+        h = h * (1 + scale1) + shift1
+        h = self.conv1(h)
+
+        scale2, shift2 = self.film2(emb).view(-1, 2 * self.out_channels, 1, 1).chunk(2, dim=1)
+        h = self.norm2(h)
+        h = h * (1 + scale2) + shift2
+        h = self.conv2(h)
+
+        return h + self.skip_conv(x)
 
 
-        xc = self.norm2(xc)
-        betat, gammat = tout.view(-1, 2*self.out_channels, 1, 1).chunk(2, dim=1)
-    
-        xc = xc*betat + gammat #FiLM style embedding
-        xc = self.conv2(xc)
-        
-        # Add correct residual connection
-        out = xc + self.skip_conv(x)
-        return out
-    
 class UnetDown(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, num_heads: int=None, context_dim: int=256, num_res: int=2):
+    """
+    UPDATE: simplified conditioning interface. All residual blocks receive the
+    fused `emb` (so context reaches every block); attention blocks receive the
+    tokenized context (or None when cross-attention is disabled).
+    """
+    def __init__(self, in_channels: int, out_channels: int, emb_dim: int,
+                 num_heads: int = None, context_dim: int = 256, num_res: int = 2,
+                 use_cross_attn: bool = True):
         super().__init__()
-        
-        self.conv1 = ResidualConvBlock(in_channels, out_channels)
-        self.attn1 = AttentionBlock(out_channels, context_dim, mlp_dim=out_channels*2, heads=num_heads) if num_heads is not None else nn.Identity()
+        self.conv1 = ResidualConvBlock(in_channels, out_channels, emb_dim)
+        self.attn1 = (AttentionBlock(out_channels, context_dim, mlp_dim=out_channels * 2,
+                                     heads=num_heads, use_cross_attn=use_cross_attn)
+                      if num_heads is not None else nn.Identity())
 
         self.rem_blocks = []
-        for _ in range(num_res-1):
-            self.rem_blocks.append(ResidualConvBlock(out_channels, out_channels))
+        for _ in range(num_res - 1):
+            self.rem_blocks.append(ResidualConvBlock(out_channels, out_channels, emb_dim))
             if num_heads is not None:
-                self.rem_blocks.append(AttentionBlock(out_channels, context_dim, mlp_dim=out_channels*2, heads=num_heads))
+                self.rem_blocks.append(AttentionBlock(out_channels, context_dim,
+                                                      mlp_dim=out_channels * 2, heads=num_heads,
+                                                      use_cross_attn=use_cross_attn))
         self.rem_blocks = nn.ModuleList(self.rem_blocks)
         self.down_conv = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=2, padding=1)
 
-
-
-    def forward(self, x: torch.Tensor, c_attn: torch.Tensor, c_embed: torch.Tensor, tin: torch.Tensor, tout: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, c_attn, emb: torch.Tensor):
         """
-        x: Input tensor of shape (B, in_channels, H, W)
-        c_attn: Context tensor for cross attention of shape (B, context_dim)
-        c_embed: Context embedding tensor of shape (B, in_channels*2)
-        tin: Time embedding tensor of shape (B, in_channels*2)
-        tout: Time embedding tensor of shape (B, out_channels*2)
+        x:      (B, in_channels, H, W)
+        c_attn: (B, num_tokens, context_dim) or None — context for cross-attention
+        emb:    (B, emb_dim) — fused time + camera + context embedding
         Returns:
-            x: Output tensor of shape (B, out_channels, H/2, W/2)
+            x:    (B, out_channels, H/2, W/2)
+            skip: (B, out_channels, H, W)
         """
- 
-        x = self.conv1(x, c_embed, tin, tout) # B, in_channels, H, W -> B, out_channels, H, W
-
-        x = self.attn1(x, c_attn) if isinstance(self.attn1, AttentionBlock) else self.attn1(x) # B, out_channels, H, W -> B, out_channels, H, W
+        x = self.conv1(x, emb)
+        x = self.attn1(x, c_attn) if isinstance(self.attn1, AttentionBlock) else self.attn1(x)
 
         for block in self.rem_blocks:
             if isinstance(block, ResidualConvBlock):
-                # Choosing not to use context for residual_block 2+
-                x = block(x, None, tout, tout) # B, out_channels, H, W -> B, out_channels, H, W
+                # UPDATE: context now reaches residual blocks 2+ (via emb);
+                # previously they received time-only modulation.
+                x = block(x, emb)
             else:
-                # Need context in original dim for cross attention
-                x = block(x, c_attn) # B, out_channels, H, W -> B, out_channels, H, W
+                x = block(x, c_attn)
 
         skip = x
-        x = self.down_conv(x) # B, out_channels, H, W -> B, out_channels, H/2, W/2
+        x = self.down_conv(x)
         return x, skip
+
 
 class UnetUp(nn.Module):
     """
-    Upsampling block for U-Net architecture.
+    Upsampling block. Same conditioning updates as UnetDown.
     """
-    def __init__(self, in_channels: int, out_channels: int, num_heads: int=None, context_dim: int=256, num_res: int=2):
+    def __init__(self, in_channels: int, out_channels: int, emb_dim: int,
+                 num_heads: int = None, context_dim: int = 256, num_res: int = 2,
+                 use_cross_attn: bool = True):
         super().__init__()
         self.up_conv = nn.ConvTranspose2d(in_channels, out_channels, 2, 2)
-        self.conv1 = ResidualConvBlock(2*out_channels, out_channels)
-        self.attn1 = AttentionBlock(out_channels, context_dim, mlp_dim=out_channels*2, heads=num_heads) if num_heads is not None else nn.Identity()
+        self.conv1 = ResidualConvBlock(2 * out_channels, out_channels, emb_dim)
+        self.attn1 = (AttentionBlock(out_channels, context_dim, mlp_dim=out_channels * 2,
+                                     heads=num_heads, use_cross_attn=use_cross_attn)
+                      if num_heads is not None else nn.Identity())
         self.rem_blocks = []
-        for _ in range(num_res-1):
-            self.rem_blocks.append(ResidualConvBlock(out_channels, out_channels))
+        for _ in range(num_res - 1):
+            self.rem_blocks.append(ResidualConvBlock(out_channels, out_channels, emb_dim))
             if num_heads is not None:
-                self.rem_blocks.append(AttentionBlock(out_channels, context_dim, mlp_dim=out_channels*2, heads=num_heads))
+                self.rem_blocks.append(AttentionBlock(out_channels, context_dim,
+                                                      mlp_dim=out_channels * 2, heads=num_heads,
+                                                      use_cross_attn=use_cross_attn))
         self.rem_blocks = nn.ModuleList(self.rem_blocks)
 
-    def forward(self, x: torch.Tensor, c_attn, c_embed, tin , tout, skip) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, c_attn, emb: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
         """
-        x: Input tensor of shape (B, in_channels, H, W)
-        c_attn: Context tensor for cross attention of shape (B, context_dim)
-        c_embed: Context embedding tensor of shape (B, in_channels*2)
-        tin: Time embedding tensor of shape (B, (2*out_channels)*2)
-        tout: Time embedding tensor of shape (B, out_channels*2)
-        skip: Skip tensor of shape (B, out_channels, H, W)
+        x:      (B, in_channels, H, W)
+        c_attn: (B, num_tokens, context_dim) or None
+        emb:    (B, emb_dim)
+        skip:   (B, out_channels, H, W)
         Returns:
-            x: Output tensor of shape (B, out_channels, H*2, W*2)
+            x: (B, out_channels, H*2, W*2)
         """
-        x = self.up_conv(x) # B, in_channels, H, W -> B, out_channels, H*2, W*2
-        x = torch.cat((x, skip), 1) # B, out_channels, H, W -> B, 2*out_channels, H, W 
-        x = self.conv1(x, c_embed, tin, tout) # B, 2*out_channels, H, W -> B, out_channels, H, W
-        x = self.attn1(x, c_attn) if isinstance(self.attn1, AttentionBlock) else self.attn1(x) # B, out_channels, H, W -> B, out_channels, H, W
+        x = self.up_conv(x)
+        x = torch.cat((x, skip), 1)
+        x = self.conv1(x, emb)
+        x = self.attn1(x, c_attn) if isinstance(self.attn1, AttentionBlock) else self.attn1(x)
         for block in self.rem_blocks:
             if isinstance(block, ResidualConvBlock):
-                x = block(x, None, tout, tout) # B, out_channels, H, W -> B, out_channels, H, W
+                x = block(x, emb)
             else:
-                x = block(x, c_attn) # B, out_channels, H, W -> B, out_channels, H, W
-
+                x = block(x, c_attn)
         return x
+
 
 class UNetBottleneck(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, context_dim: int):
+    """Same conditioning updates as UnetDown/UnetUp."""
+    def __init__(self, in_channels: int, out_channels: int, context_dim: int,
+                 emb_dim: int, use_cross_attn: bool = True):
         super().__init__()
-        self.conv1 = ResidualConvBlock(in_channels, out_channels)
-        self.attn1 = AttentionBlock(out_channels, context_dim, mlp_dim=out_channels*2, heads=8)
-        self.conv2 = ResidualConvBlock(out_channels, out_channels)
+        self.conv1 = ResidualConvBlock(in_channels, out_channels, emb_dim)
+        self.attn1 = AttentionBlock(out_channels, context_dim, mlp_dim=out_channels * 2,
+                                    heads=8, use_cross_attn=use_cross_attn)
+        self.conv2 = ResidualConvBlock(out_channels, out_channels, emb_dim)
 
-    def forward(self, x: torch.Tensor, c_attn, c_embed, t) -> torch.Tensor:
-        x = self.conv1(x, c_embed, t, t) # B, in_channels, H, W -> B, out_channels, H, W
-        x = self.attn1(x, c_attn) # B, out_channels, H, W -> B, out_channels, H, W
-        x = self.conv2(x, c_embed, t, t) # B, out_channels, H, W -> B, out_channels, H, W
+    def forward(self, x: torch.Tensor, c_attn, emb: torch.Tensor) -> torch.Tensor:
+        x = self.conv1(x, emb)
+        x = self.attn1(x, c_attn)
+        x = self.conv2(x, emb)
         return x
-        
+
+
 class TokenizeContext(nn.Module):
     """
-    Turns context vector of shape (B, context_len) into a tensor of shape (B, context_len, context_dim) for cross attention.
+    Turns a context vector of shape (B, context_len) into (B, context_len,
+    context_dim) tokens for cross-attention.
+
+    UPDATE: each token now gets a learned per-parameter identity embedding.
+    Previously all scalars went through the same Linear(1->D) with no identity,
+    so keys/values could not encode WHICH parameter a token represented — the
+    context behaved as an unordered set of anonymous numbers, and queries could
+    not attend to (say) the Moon terms specifically.
+
+    NOTE the constructor signature change: `context_len` is now the ACTUAL
+    number of context entries (e.g. 16), not 1 as it was effectively called
+    with in unet.py.
     """
     def __init__(self, context_len: int, context_dim: int):
         super().__init__()
         self.context_len = context_len
         self.context_dim = context_dim
+        # Shared scalar -> vector lift (same role as before)
         self.net = nn.Sequential(
-            nn.Linear(context_len, context_dim),
+            nn.Linear(1, context_dim),
             nn.SiLU(),
             nn.Linear(context_dim, context_dim),
         )
+        # UPDATE: learned identity embedding per parameter index.
+        self.param_embed = nn.Parameter(torch.randn(context_len, context_dim) * 0.02)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.unsqueeze(-1)
-        return self.net(x)
-    
+        # x: (B, context_len)
+        tokens = self.net(x.unsqueeze(-1))          # (B, context_len, context_dim)
+        return tokens + self.param_embed.unsqueeze(0)
+
+
 class EmbedFC(nn.Module):
-    """
-    Fully connected embedding network.
-    """
+    """Unchanged from unet.py (kept for the conditioning trunk MLPs)."""
     def __init__(self, input_dim: int, emb_dim: int):
         super().__init__()
         self.input_dim = input_dim
@@ -304,62 +438,69 @@ class EmbedFC(nn.Module):
         return self.model(x)
 
 
-def build_film_mlps(n_feat, channel_mults, time_dim, context_len):
-    film_channels = set()
+class ConditioningEmbedding(nn.Module):
+    """
+    UPDATE (new): fuses time, camera, and context into ONE embedding vector that
+    feeds every block's adaLN-Zero modulation. This replaces build_film_mlps()
+    (per-channel-count shared MLPs) from unet.py: the shared trunk lives here,
+    and each ResidualConvBlock derives its own (scale, shift) from the fused
+    embedding with its own zero-initialized head.
+    """
+    def __init__(self, time_dim: int, context_len: int, emb_dim: int, num_cameras: int):
+        super().__init__()
+        self.time_fourier = FourierEncoder(time_dim)
+        self.time_mlp = EmbedFC(time_dim, emb_dim)
+        self.context_mlp = EmbedFC(context_len, emb_dim)
+        self.camera_embed = nn.Embedding(num_cameras, emb_dim)
+        nn.init.normal_(self.camera_embed.weight, std=0.02)
+        # A final nonlinearity+linear lets the network mix the three sources.
+        self.fuse = nn.Sequential(nn.SiLU(), nn.Linear(emb_dim, emb_dim))
 
-    # downs
-    in_ch = n_feat * channel_mults[0]
-    for mult in channel_mults:
-        out_ch = n_feat * mult
-        film_channels.add(in_ch)
-        film_channels.add(out_ch)
-        in_ch = out_ch
-
-    # bottleneck
-    bot_ch = n_feat * channel_mults[-1]
-    film_channels.add(bot_ch)
-
-    # ups
-    prev_ch = bot_ch
-    for mult in reversed(channel_mults):
-        out_ch = n_feat * mult
-        film_channels.add(prev_ch)
-        film_channels.add(out_ch)
-        film_channels.add(out_ch*2)   # after concat
-        prev_ch = out_ch
-
-    time_mlps    = nn.ModuleDict()
-    context_mlps = nn.ModuleDict()
-    for C in sorted(film_channels):
-        k = str(C)
-        time_mlps[k]    = EmbedFC(time_dim,    2 * C)
-        context_mlps[k] = EmbedFC(context_len, 2 * C)
-    return time_mlps, context_mlps
+    def forward(self, t: torch.Tensor, c: torch.Tensor, cam=None) -> torch.Tensor:
+        # t: (B, 1, 1, 1);  c: (B, context_len);  cam: (B,) long or None
+        emb = self.time_mlp(self.time_fourier(t)) + self.context_mlp(c)
+        if cam is not None:
+            emb = emb + self.camera_embed(cam)
+        return self.fuse(emb)
 
 
 class ContextUnet(nn.Module):
+    """
+    Same external interface as unet.py's ContextUnet:
+        forward(x, c, t, context_mask, cam=None)
+    with c: (B, 1, context_len), context_mask: 1 = drop conditioning.
+
+    New constructor args:
+        emb_dim        — width of the fused conditioning embedding (default 256)
+        use_cross_attn — enable/disable cross-attention for A/B testing
+    """
     def __init__(self, in_feats, context_len,
-                 n_feat=64, time_dim=128, context_dim=64,
-                 channel_mults=(1,2,2,4), heads_at=(2,3), num_res=(2,2,2,2),
-                 num_cameras=4):
+                 n_feat=64, time_dim=128, context_dim=64, emb_dim=256,
+                 channel_mults=(1, 2, 2, 4), heads_at=(2, 3), num_res=(2, 2, 2, 2),
+                 num_cameras=4, use_cross_attn=True):
         super().__init__()
         self.in_feats = in_feats
+        self.context_len = context_len
         self.n_feat = n_feat
         self.channel_mults = channel_mults
         self.num_res = num_res if isinstance(num_res, list) else [num_res] * len(channel_mults)
         self.init_conv = nn.Conv2d(in_feats, n_feat, 3, 1, 1)
         self.heads_at = heads_at
+        self.use_cross_attn = use_cross_attn
 
+        # UPDATE: single fused conditioning embedding (replaces build_film_mlps
+        # and the separate time/context FiLM dictionaries).
+        self.cond_embed = ConditioningEmbedding(time_dim, context_len, emb_dim, num_cameras)
 
+        # UPDATE: learned null context for classifier-free guidance. Dropped
+        # samples get this vector instead of zeros, so "unconditional" no longer
+        # collides with physically-valid zero parameter values.
+        self.null_context = nn.Parameter(torch.zeros(context_len))
 
-        # Embeddings
-        self.time_fourier = FourierEncoder(time_dim)
-        self.camera_embed = nn.Embedding(num_cameras, time_dim)
-        nn.init.normal_(self.camera_embed.weight, std=0.02)
-        self.attn_context_embed = TokenizeContext(1, context_dim)
-        self.time_mlps, self.context_mlps = build_film_mlps(
-            n_feat, channel_mults, time_dim, context_len
-        )
+        # UPDATE: tokenizer now receives the true context length and adds
+        # per-parameter identity embeddings. Only built when cross-attn is on.
+        if use_cross_attn:
+            self.attn_context_embed = TokenizeContext(context_len, context_dim)
 
         # Downs
         self.downs = nn.ModuleList()
@@ -367,13 +508,15 @@ class ContextUnet(nn.Module):
         for i, mult in enumerate(channel_mults):
             out_ch = n_feat * mult
             num_heads = 8 if i in heads_at else None
-            self.downs.append(UnetDown(in_ch, out_ch, num_heads=num_heads,
-                                       context_dim=context_dim, num_res=self.num_res[i]))
+            self.downs.append(UnetDown(in_ch, out_ch, emb_dim=emb_dim, num_heads=num_heads,
+                                       context_dim=context_dim, num_res=self.num_res[i],
+                                       use_cross_attn=use_cross_attn))
             in_ch = out_ch
 
         # Bottleneck
         bot_ch = n_feat * channel_mults[-1]
-        self.bottleneck = UNetBottleneck(bot_ch, bot_ch, context_dim)
+        self.bottleneck = UNetBottleneck(bot_ch, bot_ch, context_dim, emb_dim=emb_dim,
+                                         use_cross_attn=use_cross_attn)
 
         # Ups
         self.ups = nn.ModuleList()
@@ -382,8 +525,9 @@ class ContextUnet(nn.Module):
             out_ch = n_feat * mult
             stage_idx = len(channel_mults) - 1 - i
             num_heads = 8 if stage_idx in heads_at else None
-            self.ups.append(UnetUp(prev_ch, out_ch, num_heads=num_heads,
-                                    context_dim=context_dim, num_res=self.num_res[stage_idx]))
+            self.ups.append(UnetUp(prev_ch, out_ch, emb_dim=emb_dim, num_heads=num_heads,
+                                   context_dim=context_dim, num_res=self.num_res[stage_idx],
+                                   use_cross_attn=use_cross_attn))
             prev_ch = out_ch
 
         self.out = nn.Sequential(
@@ -391,57 +535,35 @@ class ContextUnet(nn.Module):
             nn.SiLU(),
             nn.Conv2d(in_channels=prev_ch, out_channels=1, kernel_size=3, stride=1, padding=1)
         )
-
-    def film(self, mlp_dict: nn.ModuleDict, C: int, x: torch.Tensor) -> torch.Tensor:
-        """
-        Helper to get embeddings for corresponding channel count.
-        """
-        return mlp_dict[str(C)](x)
+        # UPDATE: zero-init the output conv (standard diffusion practice).
+        nn.init.zeros_(self.out[-1].weight)
+        nn.init.zeros_(self.out[-1].bias)
 
     def forward(self, x, c, t, context_mask, cam=None):
         x = self.init_conv(x)
 
-        fourier_t = self.time_fourier(t)
-        if cam is not None:
-            # Add the camera embedding to the time embedding; flows through the
-            # existing FiLM pathway and modulates every resolution.
-            fourier_t = fourier_t + self.camera_embed(cam)
-
+        # Flatten context and mask to (B, context_len); mask semantics unchanged
+        # (1 = drop conditioning for that sample).
         c = c.reshape(c.shape[0], c.shape[2])
-        context_mask = context_mask.reshape(x.shape[0], c.shape[1])
-        c = c * (1 - context_mask)
-        c_attn = self.attn_context_embed(c)
+        context_mask = context_mask.reshape(c.shape[0], c.shape[1])
+
+        # UPDATE: dropped samples get the learned null vector, not zeros.
+        c = c * (1 - context_mask) + self.null_context.view(1, -1) * context_mask
+
+        # UPDATE: one fused embedding drives all FiLM modulation. Camera flows
+        # through here exactly as before (added to the time pathway).
+        emb = self.cond_embed(t, c, cam)
+
+        c_attn = self.attn_context_embed(c) if self.use_cross_attn else None
 
         skips = []
-
-        # Downs
-        in_ch = self.n_feat * self.channel_mults[0]
-        for i, down in enumerate(self.downs):
-            out_ch = self.n_feat * self.channel_mults[i]
-
-            tin  = self.film(self.time_mlps, in_ch,  fourier_t)
-            tout = self.film(self.time_mlps, out_ch, fourier_t)
-            c_embed  = self.film(self.context_mlps, in_ch,  c)  
-
-            x, skip = down(x, c_attn=c_attn, c_embed=c_embed, tin=tin, tout=tout)
+        for down in self.downs:
+            x, skip = down(x, c_attn=c_attn, emb=emb)
             skips.append(skip)
-            in_ch = out_ch
 
-        # Bottleneck
-        bot_ch = self.n_feat * self.channel_mults[-1]
-        t_bot  = self.film(self.time_mlps,    bot_ch, fourier_t)
-        c_bot  = self.film(self.context_mlps, bot_ch, c)
-        x = self.bottleneck(x, c_attn=c_attn, c_embed=c_bot, t=t_bot)
+        x = self.bottleneck(x, c_attn=c_attn, emb=emb)
 
-        # Ups
-        for i, up in enumerate(self.ups):
-            out_ch = self.n_feat * self.channel_mults[-(i+1)]
-            in_cat_ch = out_ch*2   # because of concat with skip
-
-            tin  = self.film(self.time_mlps, in_cat_ch, fourier_t)
-            tout = self.film(self.time_mlps, out_ch,    fourier_t)
-            c_embed  = self.film(self.context_mlps, in_cat_ch, c)
-
-            x = up(x, c_attn=c_attn, c_embed=c_embed, tin=tin, tout=tout, skip=skips.pop())
+        for up in self.ups:
+            x = up(x, c_attn=c_attn, emb=emb, skip=skips.pop())
 
         return self.out(x)

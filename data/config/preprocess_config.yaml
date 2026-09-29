@@ -2,7 +2,7 @@
 fits_folder: /pdo/qlp-data/tica-delivery/
 
 #Output folder for processed angle data
-angle_folder: /pdo/users/djtufto/cam3/angle_full/
+angle_folder: /pdo/users/djtufto/angles
 
 #Output folder for processed CCD images
 ccd_folder: /pdo/users/djtufto/cam3/tica_sector30
@@ -11,7 +11,7 @@ ccd_folder: /pdo/users/djtufto/cam3/tica_sector30
 background_ccd_folder: /pdo/users/djtufto/cam3/bg4096
 
 #Processed angle dictionary pickle to load from angle_folder
-angles_dic: angles_O11-116_cam_3_data_dic_full.pkl
+angles_dic: angles_O11-116_cam_ALL_data_dic_full.pkl
 
 #(Optional) folder for saving debug images ('' to disable)
 display_images_folder: ''
@@ -19,14 +19,14 @@ display_images_folder: ''
 
 image_size: 4096
 
-camera_number: '3'
+camera_number: 'all'
 
 #Number of workers to use
 num_workers: 10
 
 #First and last orbit number to process (inclusive)
-orbit_start: 30
-orbit_end: 30
+orbit_start: 11
+orbit_end: 116
 
 #List of orbit numbers to skip entirely (leave empty list to process all)
 skip_orbits: []

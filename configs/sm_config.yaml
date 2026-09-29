@@ -1,73 +1,105 @@
-# Default configuration for BEAM model training
+# Configuration for BEAM model training (use with scripts/train.py)
 
 # Model parameters
 model:
-  n_feat: 128           # Number of features in U-Net
-  epsilon: 0.0001          # Bound t for stability
+  n_feat: 128            # Number of features in U-Net
+  epsilon: 0.0001        # Bound t for stability
   drop_prob: 0.1         # Dropout probability for classifier-free guidance
-  architecture: "noise"   # Parametrization: "flow" (velocity, OT schedule, ODE sampling),
-                          # "noise" (epsilon), "score", or "v" (all VP schedule, SDE sampling).
-                          # NOTE: "noise" now trains true epsilon-prediction; the v-prediction
-                          # that this key used to select is now "v".
+  architecture: "flow"   # Parametrization: "flow" (velocity, OT schedule, ODE sampling), or "noise" / "score" / "v" (VP schedule, SDE sampling)
   channel_mults: [1,1,2,2,2] # Channel multipliers for the U-Net: layer i has n_feat*channel_mults[i] features
-  heads_at: [2,3,4] # Use attention at these indices in above channel_mults
-  num_res: 2 # Number of residual blocks in each layer; if int, same for all layers
+  heads_at: [2,3,4]      # Use attention at these indices in above channel_mults
+  num_res: 2             # Number of residual blocks in each layer; if int, same for all layers
+  emb_dim: 256           # width of the fused time+camera+context conditioning embedding
+  time_dim: 128          # Fourier time-feature width (the archived V1 trainer hardcoded 64)
+  context_dim: 64        # cross-attention token width (the archived V1 trainer hardcoded 64)
+  use_cross_attn: False   # A/B flag — set False to train the FiLM-only model
+  t_sampler: "logit_normal"      # Base sampler: "uniform" or "logit_normal" (SD3 recipe;
+                            # appropriate now that compute_stats confirms ~unit-scale data)
+  t_logit_mean: 0.0         # NEW: logit-normal location (t = sigmoid(N(mean, std)))
+  t_logit_std: 1.06         # NEW: logit-normal scale (both ignored for "uniform")
+  # Low-t boost — MEASURED motivation (epoch-249 offline eval): flux error of the
+  # implied x̂₁ is ~0 above t=0.1 and rises to RMS 0.20 / bias +0.036 below t=0.01;
+  # the c->flux map is undertrained exactly where uniform puts 5% of samples (and
+  # logit_normal(0,1) only 0.16%). The boost redraws a fraction of each batch's t
+  # log-uniformly over the measured band:
+  t_low_boost_prob: 0.0   # NEW: fraction of samples redirected to the low-t band
+  t_low_boost_min: 0.001    # NEW: band lower edge
+  t_low_boost_max: 0.1      # NEW: band upper edge (flux errors ~vanish above this)
 
-# Data parameters  
+# Data parameters
 data:
-  angle_path: /pdo/users/djtufto/cam3/angle_full/angles_O11-116_cam_3_data_dic_full.pkl  # Path to angle data
-  ccd_folder: "/pdo/users/djtufto/cam3/tica/tica_below_sunshade/" # Folder containing processed images
-  image_shape: [4096, 4096] # Shape of the images
-  patch_size: [256, 256] # Shape of the patches; null for no patches
-  repeat_factor: 1 # Iterate repeat_factor times over the dataset each epoch
-  orbit_threshold: 45 # Split training and validation at this orbit number (exclusive to train)
-  orbit_max: 54 # Maximum orbit number to include in validation (inclusive to validation)
-  orbit_skip: [] # Withold these orbits from training and validation
-  mean: 0.01 #Dataset mean (for normalization)
-  std: 0.05 #Dataset standard deviation (for normalization)
-  camera_number: '3'
+  # AUDIT: _FIXED pickle regenerated 2026-07-07 after correcting the camera-Moon
+  # column indexing bug in process_angles.py (M{cam} columns previously read the
+  # wrong .out columns — E{cam-1} values). Do not train against the old pickle.
+  angle_path: /pdo/users/djtufto/angles_O11-116_allcams_data_FIXED.pkl
+  ccd_folder:
+    - /pdo/users/djtufto/cam3/tica/O11-116/256x256  # Folder containing processed images
+  image_shape: [256,256] # Shape of the images
+  patch_size: null       # Shape of the patches; null for no patches
+  repeat_factor: 1       # Iterate repeat_factor times over the dataset each epoch
+  orbit_threshold: 45    # Split training and validation at this orbit number (exclusive to train)
+  orbit_max: 54          # Maximum orbit number to include in validation (inclusive to validation)
+  # AUDIT: orbit_skip removed — it was never read by the training pipeline
+  # (only the archived StarDataset accepted it).
+  # AUDIT: hand-set mean/std keys REMOVED — a stale hand-set std (0.05 vs the true
+  # ~0.72) is exactly how the 14x-off normalization happened. Stats must now come
+  # from compute_stats or stats_path; training refuses to start otherwise.
+  compute_stats: True    # One GPU pass over the TRAIN split before training computes the
+                         # mean/std of exposure-equalized flux; saved to <save_dir>/image_stats.pkl
+  stats_path: null       # Alternative to compute_stats: path to an existing image_stats.pkl
+                         # (e.g. from a previous run) — reused verbatim and copied into save_dir
+  stats_max_images: null # Evenly-spaced file cap for the stats pass (null = all)
+  camera_number: '3'     # AUDIT: informational only for training (camera comes from each
+                         # filename; folder choice selects the camera). Used by generation.
+  add_exposure_flag: False   # append ±1 feature marking the orbit>61 (x3 flux) regime
+  normalize_context: True   # standardize conditioning with train-orbit statistics
+
 ema:
-  beta: 0.9999 #EMA decay rate
-  update_after_step: 10000 #Number of warmupsteps before updating EMA
+  beta: 0.9999             # EMA decay rate
+  update_after_step: 10000 # Number of warmup steps before updating EMA
 
 optimizer:
-  max_lr: 0.0001 #Maximum learning rate
-  min_lr: 0.000001 #Minimum learning rate
-  weight_decay: 0.00 #Weight decay
-  warmup_steps: 1000 #Number of warmup steps
-  grad_clip: 1.0 #Gradient clip
+  max_lr: 0.0001    # Maximum learning rate
+  min_lr: 0.000001  # Minimum learning rate
+  weight_decay: 0.00 # Weight decay
+  warmup_steps: 1000 # Number of warmup steps
+  grad_clip: 1.0     # Gradient clip
 
 # Training parameters
 training:
-  n_epoch: 600          # Maximum number of epochs
-  batch_size: 16         # Batch size
-  patience: 100          # Early stopping patience
-  mixed_precision: True # Use BF16 for training
+  n_epoch: 600           # Maximum number of epochs
+  batch_size: 24         # Batch size
+  patience: 300          # Early stopping patience
+  mixed_precision: True  # Use BF16 for training
+  loss_display_ema: 0.98 # EMA weight for the DISPLAYED train loss only
+                         #           (was tied to ema.beta=0.9999, which froze the readout)
+  valid_seed: 42         # seed for the deterministic validation pass (fixed t + noise)
+  valid_t_bins: 10       # number of t-bins for per-t validation loss logging
 
 # Checkpoint parameters
 checkpoint:
   save_model: True       # Save model checkpoints
-  epoch_checkpoint: 1  # Save samples every N epochs
+  epoch_checkpoint: 50    # Save samples every N epochs
   checkpoint_gpu: 0      # GPU ID to use for checkpoints
   save_weights_only: False # Save only weights
-  save_best_only: True # Save best model only at each checkpoint. 
+  save_best_only: True   # Save best model only at each checkpoint.
 
 load_checkpoint: null
-  
+
 # Weights & Biases parameters
 wandb:
-  enabled: True         # Enable W&B logging
+  enabled: True          # Enable W&B logging
   project: "beam-tess"   # W&B project name
   mode: "online"         # W&B mode (online, offline, disabled)
-  log_freq: 20          # Log batch metrics every N batches (higher value = less traffic)
-  log_samples_freq: 100   # Log sample images every N epochs
+  log_freq: 20           # Log batch metrics every N batches (higher value = less traffic)
+  log_samples_freq: 100  # Log sample images every N epochs
   log_model_freq: 100    # Log model weights every N epochs
-  model_name: "Camera_3_tica_star_256x256"     # Base name for the model and W&B run
-  
+  model_name: "Camera_3_tica_flow_256x256" # Base name for the model and W&B run
+
 # Paths
 paths:
-  save_dir: "model_outputs/cam3_tica_star_256x256"  # Directory to save model and results
-  
+  save_dir: "model_outputs/cam3_tica_flow_256x256"  # Directory to save model and results
+
 # Distributed training
 distributed:
   world_size: 2       # Number of GPUs (null = auto-detect)

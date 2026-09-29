@@ -5,6 +5,7 @@ This module provides utility functions for logging metrics, images,
 and other artifacts to Weights & Biases during training.
 """
 
+import inspect
 import os
 import numpy as np
 import matplotlib.pyplot as plt
@@ -177,16 +178,21 @@ def log_sample_images(
         if labels is not None:
             return f"Class {int(labels[i])}"
         return f"Sample {i}"
+
+    extra_kwargs = {}
+    if 'cam' in data_batch and 'cam' in inspect.signature(model.simulate).parameters:
+        extra_kwargs['cam'] = data_batch['cam'][:n_datapoint].to(device)
     # Generate samples
     with torch.no_grad():
         x_gen, x_gen_store, timesteps_store = model.simulate(
-            c_real, 
-            n_sample, 
-            (image_shape[0], image_shape[1]), 
+            c_real,
+            n_sample,
+            (image_shape[0], image_shape[1]),
             device,
             num_save=8,
-            num_steps=3000,
-            guidance_scale=1.0
+            num_steps=300,
+            guidance_scale=1.2,
+            **extra_kwargs
         )
     if len(x_gen.shape) == 3:
         x_gen = x_gen.unsqueeze(0)

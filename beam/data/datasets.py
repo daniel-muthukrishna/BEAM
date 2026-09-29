@@ -1,8 +1,42 @@
 """
-Dataset classes for TESS image data.
+Dataset classes for TESS image data — V2.
 
-This module contains dataset implementations for loading and processing
-TESS (Transiting Exoplanet Survey Satellite) image data.  
+Summary of updates vs datasets.py (marked "UPDATE" at each site):
+
+ 1. Conditioning encoding. The 12 raw parameters are re-encoded as 16 features:
+      - the 4 azimuths are circular quantities, so each becomes (sin, cos) —
+        removes the 359°/1° discontinuity the network otherwise has to learn,
+      - elevations and inverse distances pass through unchanged (standardized
+        below).
+    Feature layout (document this anywhere you build conditioning!):
+      [1/ED, 1/MD, 1/ED^2, 1/MD^2,
+       Eel,  sin(Eaz),  cos(Eaz),
+       Mel,  sin(Maz),  cos(Maz),
+       Ecam_el, sin(Ecam_az), cos(Ecam_az),
+       Mcam_el, sin(Mcam_az), cos(Mcam_az)]
+    followed (optionally) by the exposure flag and patch-location embedding.
+
+ 2. Standardization. Each of the 16 features is standardized to zero mean /
+    unit variance using statistics computed from the TRAINING orbits only
+    (create_train_valid_datasets_by_orbit computes and installs them — no
+    leakage from validation). Previously raw values with wildly different
+    scales (1/ED^2 vs degrees) went straight into Linear layers.
+
+ 3. Exposure-epoch flag (optional, default on). Images with orbit > 61 are
+    multiplied by 3 in this pipeline; the angles alone cannot tell the model
+    which flux regime a sample is in, which is irreducible ambiguity. A ±1
+    flag is appended to the conditioning so the model can tell.
+
+ 4. Patch-location conditioning RESTORED. datasets.py computed the patch
+    row/col sin-cos embedding but the concat onto the conditioning vector was
+    commented out — so in patch mode the model could not know WHERE in the FFI
+    it was generating. It is appended again whenever patch_size is set.
+
+ 5. Angles are ALWAYS radians — process_angles.py converts to radians when
+    building the pickle, so no unit handling exists here.
+
+The image-loading path (pickle / mmap, patch crop, normalization, orbit>61 x3)
+is copied unchanged.
 """
 
 import os
@@ -13,10 +47,36 @@ from typing import Dict, Tuple, Optional, Union, List
 import numpy as np
 import math
 import torch
-from torch.utils.data import Dataset, Subset
-import torchvision.transforms as transforms
-from PIL import Image
-from astropy.io import fits
+from torch.utils.data import Dataset, Subset, DataLoader
+from tqdm import tqdm
+
+
+def build_context_features(angles: Dict, camera: str) -> np.ndarray:
+    """
+    12 parameter geometric info -> 16 features
+    """
+    e_az = angles['Eaz']
+    m_az = angles['Maz']
+    ec_az = angles['E' + camera + 'az']
+    mc_az = angles['M' + camera + 'az']
+
+    return np.array([
+        angles['1/ED'], angles['1/MD'],
+        angles['1/ED^2'], angles['1/MD^2'],
+        angles['Eel'], math.sin(e_az), math.cos(e_az),
+        angles['Mel'], math.sin(m_az), math.cos(m_az),
+        angles['E' + camera + 'el'], math.sin(ec_az), math.cos(ec_az),
+        angles['M' + camera + 'el'], math.sin(mc_az), math.cos(mc_az),
+    ], dtype=np.float64)
+
+
+CONTEXT_FEATURE_NAMES = [
+    '1/ED', '1/MD', '1/ED^2', '1/MD^2',
+    'Eel', 'sin(Eaz)', 'cos(Eaz)',
+    'Mel', 'sin(Maz)', 'cos(Maz)',
+    'Ecam_el', 'sin(Ecam_az)', 'cos(Ecam_az)',
+    'Mcam_el', 'sin(Mcam_az)', 'cos(Mcam_az)',
+]
 
 
 class TESSDataset(Dataset):
@@ -31,9 +91,13 @@ class TESSDataset(Dataset):
         image_shape: Tuple[int, int],
         mean: float,
         std: float,
+        camera_number: str,
         patch_size: Optional[Tuple[int, int]] = None,
         repeat_factor: int = 1,
-        camera_number: str = '3',
+        add_exposure_flag: bool = True,
+        normalize_context: bool = True,
+        sky_by_sector: Optional[Dict[int, float]] = None,
+        zero_context: bool = False,
     ):
         start_time = time.time()
         # Define paths and parameters
@@ -47,139 +111,213 @@ class TESSDataset(Dataset):
 
         self.camera_number = camera_number
 
-     
+        self.add_exposure_flag = add_exposure_flag
+        self.normalize_context = normalize_context
+        # Sky normalization: per-SECTOR scalar sky level (native pkl units,
+        # BEFORE the orbit>61 x3 rescale) subtracted at load time. Sky is
+        # constant within a sector to <2 e/s but spans ~0.03-0.10 across
+        # sectors; subtracting it makes a smooth pedestal out-of-distribution
+        # instead of "some other sector's zodiacal level". Sector comes from
+        # the angle data: sector = (orbit - 7) // 2.
+        self.zero_context = zero_context
+        self.sky_by_sector = ({int(k): float(v) for k, v in sky_by_sector.items()}
+                              if sky_by_sector is not None else None)
+        self.context_mean: Optional[np.ndarray] = None
+        self.context_std: Optional[np.ndarray] = None
+        self.context_feature_names = list(CONTEXT_FEATURE_NAMES)
+
         if self.patch_size is not None:
             assert self.image_shape[0] % self.patch_size[0] == 0, "Image shape must be divisible by patch size"
 
             self.ph, self.pw = self.patch_size
-            self.patch_x = self.image_shape[0]//self.pw
-            self.patch_y = self.image_shape[1]//self.ph
-            self.num_patches = self.patch_x * self.patch_y #assume square images and patches so y = x
+            self.patch_x = self.image_shape[0] // self.pw
+            self.patch_y = self.image_shape[1] // self.ph
+            self.num_patches = self.patch_x * self.patch_y  # assume square images and patches so y = x
             self.embed_dim = 6
             self.row_embeds = embed_patch(torch.arange(self.patch_x), self.embed_dim)
             self.col_embeds = embed_patch(torch.arange(self.patch_y), self.embed_dim)
-      
-        
-    
+
         # Load orbital parameter dictionary
         self.angles_dic = pickle.load(open(self.angle_path, "rb"))
         self.MEAN = mean
         self.STD = std
-        
+
         # Find all valid image files that have corresponding angle data
         # store files for use in __getitem__
         self.files = []        # full image paths
         self.ffi_nums = []
-        self.cameras = []      
+        self.cameras = []
+        self.sky_vals = [] if self.sky_by_sector is not None else None
         for folder in self.ccd_folders:
-            print(len(os.listdir(folder)))
             for filename in os.listdir(folder):
                 ffi_num, camera = parse_ffi_camera(filename)
                 if ffi_num in self.angles_dic.keys():
+                    if self.sky_by_sector is not None:
+                        sector = (int(self.angles_dic[ffi_num]['orbit']) - 7) // 2
+                        if sector not in self.sky_by_sector:
+                            raise KeyError(
+                                f"sky_by_sector has no entry for sector {sector} "
+                                f"(file {filename}); add its sky constant")
+                        self.sky_vals.append(self.sky_by_sector[sector])
                     self.files.append(os.path.join(folder, filename))
                     self.ffi_nums.append(ffi_num)
                     self.cameras.append(camera)
                     self.length += 1
-      
-        
+
         end_time = time.time()
-        print(f"Dataset built with {self.length} samples in {end_time - start_time:.2f} seconds")
+
+        print(f"Indexed {self.length} candidate files (all orbits on disk) across "
+              f"{len(self.ccd_folders)} folder(s) in {end_time - start_time:.2f} s. ")
+
+    #now computing dataset stats at train time to make bookkeeping easier
+    def compute_context_stats(self, indices: Optional[List[int]] = None) -> Tuple[np.ndarray, np.ndarray]:
+        #use train indices
+        if indices is None:
+            indices = range(self.length)
+        rows = np.stack([
+            build_context_features(self.angles_dic[self.ffi_nums[i]], self.cameras[i])
+            for i in indices
+        ])
+        mean = rows.mean(axis=0)
+        std = rows.std(axis=0).clip(min=1e-6)
+        return mean, std
+
+    def set_context_stats(self, mean: np.ndarray, std: np.ndarray) -> None:
+        self.context_mean = np.asarray(mean, dtype=np.float64)
+        self.context_std = np.asarray(std, dtype=np.float64)
+
+    def context_stats_dict(self) -> Dict:
+        return {
+            'mean': self.context_mean,
+            'std': self.context_std,
+            'feature_names': self.context_feature_names,
+            'add_exposure_flag': self.add_exposure_flag,
+        }
 
     def _get_mmap(self, path, cache):
         mm = cache.get(path)
         if mm is None:
-            mm = np.load(path, mmap_mode='r', allow_pickle=True)  
+            mm = np.load(path, mmap_mode='r', allow_pickle=True)
             cache[path] = mm
         return mm
 
     def __len__(self) -> int:
         """Return the number of samples in the dataset."""
-        return self.length * self.repeat_factor 
-        
+        return self.length * self.repeat_factor
+
     def __getitem__(self, idx: int) -> Dict[str, Union[torch.Tensor, str]]:
         """
         Get a sample from the dataset.
-        
-        Args:
-            idx: Index of the sample to retrieve
-            
-        Returns:
-            Dictionary with:
-                - x: Orbital parameters tensor
-                - y: Image tensor
-                - ffi_num: FFI identification number
-                - orbit: Orbit number
+
+        Returns dict of:
+            x: Conditioning tensor of shape (1, L) 
+            y: Image tensor
+            ffi_num: FFI identification number
+            orbit: Orbit number
+            cam: 0-based camera index
         """
         file_path = self.files[idx]  # already a full path
         ffi_num = self.ffi_nums[idx]
-        camera = self.cameras[idx]   #"1".."4"
+        camera = self.cameras[idx]   # "1".."4", from this image's filename
 
-        # Load image data
         angles = self.angles_dic[ffi_num]
         orbit = angles['orbit']
 
-        # Prepare orbital parameters (12 values), using this sample's camera columns
-        params = np.array([
-            angles['1/ED'], angles['1/MD'],
-            angles['1/ED^2'], angles['1/MD^2'],
-            angles['Eel'], angles['Eaz'],
-            angles['Mel'], angles['Maz'],
-            angles['E' + camera + 'el'], angles['E' + camera + 'az'],
-            angles['M' + camera + 'el'], angles['M' + camera + 'az']
-        ])
-        
-        image_arr = pickle.load(open(file_path, "rb")) if self.patch_size is None else np.load(file_path, mmap_mode='r', allow_pickle=True)            
+        params = build_context_features(angles, camera)
+        if self.normalize_context and self.context_mean is not None:
+            params = (params - self.context_mean) / self.context_std
+        context = torch.from_numpy(params.astype(np.float32))
+
+        if self.add_exposure_flag:
+            flag = 1.0 if int(orbit) > 61 else -1.0
+            context = torch.cat([context, torch.tensor([flag], dtype=torch.float32)])
+
+        # np.load memory-maps true .npy files (patch mode then reads only the
+        # patch's pages) but silently ignores mmap_mode for legacy pickle files
+        # and falls back to a full 64 MB unpickle — convert with
+        # scripts/convert_pkl_to_npy.py to get the fast path.
+        image_arr = np.load(file_path, mmap_mode='r', allow_pickle=True)
 
         # Apply patch if patch_size is not None
         if self.patch_size is not None:
             patch_idx = torch.randint(self.num_patches, (1,))
             patch_row, patch_col = divmod(patch_idx.item(), self.patch_x)
-            top, left = patch_row*self.ph, patch_col*self.pw
-            image_arr = image_arr[top:top+self.ph, left:left+self.pw]
-            conditioning_loc = torch.cat([self.row_embeds[patch_row], self.col_embeds[patch_col]], dim=-1).unsqueeze(0)
+            top, left = patch_row * self.ph, patch_col * self.pw
+            image_arr = image_arr[top:top + self.ph, left:left + self.pw]
+            conditioning_loc = torch.cat([self.row_embeds[patch_row], self.col_embeds[patch_col]], dim=-1)
+            context = torch.cat([context, conditioning_loc.to(torch.float32)])
 
-        ffi_image = Image.fromarray(image_arr.flatten())
-        angles_image = Image.fromarray(params)
-
-        # Define transformations
-        transform = transforms.Compose([
-            transforms.ToTensor(),
-            lambda s: s.reshape(1, angles_image.size[1])  # Reshape to 1×N tensor
-        ])
-        target_transform = transforms.Compose([
-            lambda s: np.array(s),
-            lambda s: s.reshape(self.image_shape if self.patch_size is None else self.patch_size),  # Reshape to the target image size
-            transforms.ToTensor(),
-            transforms.Normalize(mean=self.MEAN, std=self.STD)
-        ])
-     
-
-        # Apply transformations
-        angles_image = transform(angles_image)
-        ffi_image = target_transform(ffi_image)
-
+        arr = np.asarray(image_arr, dtype=np.float32).reshape(
+            self.image_shape if self.patch_size is None else self.patch_size)
+        if self.sky_vals is not None:
+            arr = arr - self.sky_vals[idx]     # before the x3: sky is in pkl units
         if int(orbit) > 61:
-            ffi_image.mul_(3)
+            arr = arr * 3.0
+        ffi_image = (torch.from_numpy(arr).unsqueeze(0) - self.MEAN) / self.STD
 
-        # angles_image = torch.zeros_like(angles_image)
-        # angles_image = torch.cat([angles_image, conditioning_loc], dim=-1)
+        if self.zero_context:
+            # Unconditional model (e.g. the star prior): the image must not be
+            # tied to geometry; zero out the whole conditioning vector
+            # (features + flags + patch location) but keep its length.
+            context = torch.zeros_like(context)
+
         return {
-            "x": angles_image,       # Orbital parameters (1×12 vector)
-            "y": ffi_image,          # Image (64×64 or other size)
-            "ffi_num": ffi_num,      # FFI identification number
-            "orbit": orbit, # Orbit number
+            "x": context.unsqueeze(0),   # Conditioning (1, L) — L discovered by the trainer
+            "y": ffi_image,              # Image
+            "ffi_num": ffi_num,          # FFI identification number
+            "orbit": orbit,              # Orbit number
             "cam": torch.tensor(int(camera) - 1, dtype=torch.long),  # 0-based camera index
-            }
+        }
 
-    
+
+class TESSDataset_angles_only(Dataset):
+    """
+    Conditioning-only dataset for generation. Uses stats computed at training to build same encoding as in training
+    """
+    def __init__(self, angle_path, camera_number: str = '2',
+                 context_stats: Optional[Dict] = None):
+        self.angles_dic = pickle.load(open(angle_path, "rb"))
+        self.ffi_nums = list(self.angles_dic.keys())
+        self.length = len(self.ffi_nums)
+        self.camera_number = camera_number
+
+        if context_stats is not None:
+            self.context_mean = np.asarray(context_stats['mean'], dtype=np.float64)
+            self.context_std = np.asarray(context_stats['std'], dtype=np.float64)
+            self.add_exposure_flag = context_stats.get('add_exposure_flag', True)
+        else:
+            # Unnormalized output only valid against a model trained the same way.
+            self.context_mean = None
+            self.context_std = None
+            self.add_exposure_flag = True
+
+    def __getitem__(self, idx: int) -> Dict[str, Union[torch.Tensor, str]]:
+        ffi_num = self.ffi_nums[idx]
+        angles = self.angles_dic[ffi_num]
+
+        params = build_context_features(angles, self.camera_number)
+        if self.context_mean is not None:
+            params = (params - self.context_mean) / self.context_std
+        context = torch.from_numpy(params.astype(np.float32))
+
+        if self.add_exposure_flag:
+            flag = 1.0 if int(angles['orbit']) > 61 else -1.0
+            context = torch.cat([context, torch.tensor([flag], dtype=torch.float32)])
+
+        return {
+            "x": context.unsqueeze(0),
+            "ffi_num": ffi_num,
+        }
+
+    def __len__(self) -> int:
+        return self.length
+
 
 def parse_ffi_camera(filename: str) -> Tuple[str, str]:
     """
     Parse the FFI number and camera from a TICA filename, e.g.
     'hlsp_tica_tess_ffi_s0002-o1-00006084-cam1-ccd1_tess_v01_img_processed_im256x256'
     -> ffi_num='00006084', camera='1'.
-
-    The fields are dash-separated: [..., orbit, ffi_num, camN, ccdM, ...].
     """
     parts = filename.split('-')
     ffi_num = parts[2]
@@ -190,19 +328,13 @@ def parse_ffi_camera(filename: str) -> Tuple[str, str]:
 def embed_patch(prow, embed_dim):
     """
     Embed a patch location into a vector of dimension embed_dim. (1 row and col embedding)
-    Args:
-        prow: 1d tensor of patch row indices
-        embed_dim: Dimension of the embedding
-    Returns:
-        Embedding of the patch location with dimension embed_dim. 
     """
-
     half = embed_dim // 2
     freqs = torch.exp(
         -math.log(10000.0) * torch.arange(half, dtype=torch.float32) / half
-    )  
-    prow = prow.unsqueeze(1) # [N, 1]
-    row_scaled = prow * freqs[None] # [N, half]
+    )
+    prow = prow.unsqueeze(1)  # [N, 1]
+    row_scaled = prow * freqs[None]  # [N, half]
 
     return torch.cat([
         torch.sin(row_scaled),
@@ -210,18 +342,11 @@ def embed_patch(prow, embed_dim):
     ], dim=-1)
 
 
-
 def create_train_valid_datasets_by_orbit(dataset: TESSDataset, orbit_threshold: int = 90, max_orbit: int = 100):
     """
-    Create training and validation datasets from a TESSDataset using orbit number as the split criterion.
-    Orbits <= orbit_threshold go to training, orbits > orbit_threshold go to validation.
-    
-    Args:
-        dataset: The complete TESSDataset
-        orbit_threshold: Orbit number threshold for splitting
-    
-    Returns:
-        Tuple of (training dataset, validation dataset)
+    Create training and validation datasets using orbit number as the split
+    criterion. Orbits <= orbit_threshold go to training, orbits > threshold
+    (and <= max_orbit) go to validation.
     """
     train_indices = [
         idx for idx, ffi_num in enumerate(dataset.ffi_nums)
@@ -231,10 +356,78 @@ def create_train_valid_datasets_by_orbit(dataset: TESSDataset, orbit_threshold: 
         idx for idx, ffi_num in enumerate(dataset.ffi_nums)
         if int(dataset.angles_dic[ffi_num]["orbit"]) > orbit_threshold and int(dataset.angles_dic[ffi_num]["orbit"]) <= max_orbit
     ]
+
+    n_files = len(dataset.ffi_nums)
+    n_unused = n_files - len(train_indices) - len(valid_indices)
+    rep = dataset.repeat_factor
+    print(f"Orbit split (threshold={orbit_threshold}, max={max_orbit}): "
+          f"{len(train_indices)} train / {len(valid_indices)} valid files "
+          f"({n_unused} of {n_files} indexed files are outside the orbit range and UNUSED)"
+          + (f"; repeat_factor x{rep} -> {len(train_indices)*rep} / {len(valid_indices)*rep} samples per epoch"
+             if rep != 1 else ""))
+
+    #compute training set stats
+    if getattr(dataset, 'normalize_context', False) and len(train_indices) > 0:
+        mean, std = dataset.compute_context_stats(train_indices)
+        dataset.set_context_stats(mean, std)
+        print("Conditioning stats (train orbits only):")
+        for name, m, s in zip(dataset.context_feature_names, mean, std):
+            print(f"  {name:>14s}: mean={m: .4e}  std={s: .4e}")
+
     train_dataset = Subset(dataset, train_indices * dataset.repeat_factor)
     valid_dataset = Subset(dataset, valid_indices * dataset.repeat_factor)
     return train_dataset, valid_dataset
 
 
+class _RawFluxDataset(Dataset):
+    """
+    """
+    def __init__(self, dataset: TESSDataset, indices):
+        self.files = [dataset.files[i] for i in indices]
+        self.scales = [
+            3.0 if int(dataset.angles_dic[dataset.ffi_nums[i]]['orbit']) > 61 else 1.0
+            for i in indices
+        ]
+        self.skys = ([dataset.sky_vals[i] for i in indices]
+                     if dataset.sky_vals is not None else None)
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, k):
+        fp = self.files[k]
+        arr = np.asarray(np.load(fp, mmap_mode='r', allow_pickle=True),
+                         dtype=np.float32)
+        if self.skys is not None:
+            arr = arr - self.skys[k]           # before the x3, as in __getitem__
+        arr = arr * self.scales[k]
+        return torch.from_numpy(arr.reshape(-1))
 
 
+def compute_image_stats(dataset: TESSDataset, indices, device=None,
+                        max_images=None, batch_size=16, num_workers=8):
+    """ """
+    idx = sorted(set(int(i) for i in indices))
+    if max_images is not None and len(idx) > int(max_images):
+        sel = np.linspace(0, len(idx) - 1, int(max_images)).astype(int)
+        idx = [idx[i] for i in sel]
+
+    device = torch.device(device) if device is not None else \
+        torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
+    loader = DataLoader(_RawFluxDataset(dataset, idx), batch_size=batch_size,
+                        num_workers=num_workers, pin_memory=(device.type == 'cuda'))
+
+    count = torch.zeros((), dtype=torch.float64, device=device)
+    s1 = torch.zeros((), dtype=torch.float64, device=device)
+    s2 = torch.zeros((), dtype=torch.float64, device=device)
+    with torch.no_grad():
+        for batch in tqdm(loader, desc=f"Computing image stats over {len(idx)} files"):
+            b = batch.to(device, non_blocking=True).double()
+            count += b.numel()
+            s1 += b.sum()
+            s2 += (b * b).sum()
+    mean = (s1 / count).item()
+    var = (s2 / count).item() - mean ** 2
+    std = max(var, 1e-12) ** 0.5
+    return float(mean), float(std)
