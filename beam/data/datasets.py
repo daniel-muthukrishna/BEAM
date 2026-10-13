@@ -1,45 +1,19 @@
 """
-Dataset classes for TESS image data — V2.
+Dataset classes for TESS image data
 
-Summary of updates vs datasets.py (marked "UPDATE" at each site):
-
- 1. Conditioning encoding. The 12 raw parameters are re-encoded as 16 features:
-      - the 4 azimuths are circular quantities, so each becomes (sin, cos) —
-        removes the 359°/1° discontinuity the network otherwise has to learn,
-      - elevations and inverse distances pass through unchanged (standardized
-        below).
-    Feature layout (document this anywhere you build conditioning!):
-      [1/ED, 1/MD, 1/ED^2, 1/MD^2,
-       Eel,  sin(Eaz),  cos(Eaz),
-       Mel,  sin(Maz),  cos(Maz),
-       Ecam_el, sin(Ecam_az), cos(Ecam_az),
-       Mcam_el, sin(Mcam_az), cos(Mcam_az)]
+Conditioning encoding feature layout: (16 features, standardized to zero mean / unit variance)
+[1/ED, 1/MD, 1/ED^2, 1/MD^2, Eel,  sin(Eaz),  cos(Eaz), Mel,  sin(Maz),  cos(Maz), Ecam_el, sin(Ecam_az), cos(Ecam_az), Mcam_el, sin(Mcam_az), cos(Mcam_az)]
     followed (optionally) by the exposure flag and patch-location embedding.
 
- 2. Standardization. Each of the 16 features is standardized to zero mean /
-    unit variance using statistics computed from the TRAINING orbits only
-    (create_train_valid_datasets_by_orbit computes and installs them — no
-    leakage from validation). Previously raw values with wildly different
-    scales (1/ED^2 vs degrees) went straight into Linear layers.
+ Exposure flag indicator value: 1.0 if orbit >= 61, -1.0 otherwise
 
- 3. Exposure-epoch flag (optional, default on). Images with orbit > 61 are
-    multiplied by 3 in this pipeline; the angles alone cannot tell the model
-    which flux regime a sample is in, which is irreducible ambiguity. A ±1
-    flag is appended to the conditioning so the model can tell.
+Patch-location conditioning: row/col sin-cos embedding
 
- 4. Patch-location conditioning RESTORED. datasets.py computed the patch
-    row/col sin-cos embedding but the concat onto the conditioning vector was
-    commented out — so in patch mode the model could not know WHERE in the FFI
-    it was generating. It is appended again whenever patch_size is set.
-
- 5. Angles are ALWAYS radians — process_angles.py converts to radians when
-    building the pickle, so no unit handling exists here.
-
-The image-loading path (pickle / mmap, patch crop, normalization, orbit>61 x3)
-is copied unchanged.
+Angles are ALWAYS radians
 """
 
 import os
+import re
 import time
 import pickle
 from typing import Dict, Tuple, Optional, Union, List
@@ -113,12 +87,12 @@ class TESSDataset(Dataset):
 
         self.add_exposure_flag = add_exposure_flag
         self.normalize_context = normalize_context
-        # Sky normalization: per-SECTOR scalar sky level (native pkl units,
-        # BEFORE the orbit>61 x3 rescale) subtracted at load time. Sky is
-        # constant within a sector to <2 e/s but spans ~0.03-0.10 across
-        # sectors; subtracting it makes a smooth pedestal out-of-distribution
-        # instead of "some other sector's zodiacal level". Sector comes from
-        # the angle data: sector = (orbit - 7) // 2.
+        # Sky normalization: per-SECTOR scalar sky level (native pkl units)
+        # subtracted at load time. Sky is constant within a sector to <2 e/s
+        # but spans ~0.03-0.10 across sectors; subtracting it makes a smooth
+        # pedestal out-of-distribution instead of "some other sector's
+        # zodiacal level". Sector comes from the angle data:
+        # sector = (orbit - 7) // 2.
         self.zero_context = zero_context
         self.sky_by_sector = ({int(k): float(v) for k, v in sky_by_sector.items()}
                               if sky_by_sector is not None else None)
@@ -229,7 +203,7 @@ class TESSDataset(Dataset):
         context = torch.from_numpy(params.astype(np.float32))
 
         if self.add_exposure_flag:
-            flag = 1.0 if int(orbit) > 61 else -1.0
+            flag = 1.0 if int(orbit) >= 61 else -1.0
             context = torch.cat([context, torch.tensor([flag], dtype=torch.float32)])
 
         # np.load memory-maps true .npy files (patch mode then reads only the
@@ -250,9 +224,7 @@ class TESSDataset(Dataset):
         arr = np.asarray(image_arr, dtype=np.float32).reshape(
             self.image_shape if self.patch_size is None else self.patch_size)
         if self.sky_vals is not None:
-            arr = arr - self.sky_vals[idx]     # before the x3: sky is in pkl units
-        if int(orbit) > 61:
-            arr = arr * 3.0
+            arr = arr - self.sky_vals[idx]     # sky is in pkl units
         ffi_image = (torch.from_numpy(arr).unsqueeze(0) - self.MEAN) / self.STD
 
         if self.zero_context:
@@ -301,7 +273,7 @@ class TESSDataset_angles_only(Dataset):
         context = torch.from_numpy(params.astype(np.float32))
 
         if self.add_exposure_flag:
-            flag = 1.0 if int(angles['orbit']) > 61 else -1.0
+            flag = 1.0 if int(angles['orbit']) >= 61 else -1.0
             context = torch.cat([context, torch.tensor([flag], dtype=torch.float32)])
 
         return {
@@ -313,16 +285,21 @@ class TESSDataset_angles_only(Dataset):
         return self.length
 
 
-def parse_ffi_camera(filename: str) -> Tuple[str, str]:
+_TICA_NAME = re.compile(r"hlsp_tica_tess_ffi_s\d+-(?:o\d+-)?(\d{8})-cam(\d)-ccd\d")
+
+
+def parse_ffi_camera(filename: str) -> Tuple[Optional[str], Optional[str]]:
     """
     Parse the FFI number and camera from a TICA filename, e.g.
     'hlsp_tica_tess_ffi_s0002-o1-00006084-cam1-ccd1_tess_v01_img_processed_im256x256'
-    -> ffi_num='00006084', camera='1'.
+    -> ffi_num='00006084', camera='1'. The orbit field is optional: sectors
+    27-35 are delivered as 'hlsp_tica_tess_ffi_s27-00116470-cam1-ccd1_...'.
+    Returns (None, None) for any other name.
     """
-    parts = filename.split('-')
-    ffi_num = parts[2]
-    camera = parts[3].replace('cam', '')
-    return ffi_num, camera
+    match = _TICA_NAME.match(filename)
+    if match is None:
+        return None, None
+    return match.group(1), match.group(2)
 
 
 def embed_patch(prow, embed_dim):
@@ -384,10 +361,6 @@ class _RawFluxDataset(Dataset):
     """
     def __init__(self, dataset: TESSDataset, indices):
         self.files = [dataset.files[i] for i in indices]
-        self.scales = [
-            3.0 if int(dataset.angles_dic[dataset.ffi_nums[i]]['orbit']) > 61 else 1.0
-            for i in indices
-        ]
         self.skys = ([dataset.sky_vals[i] for i in indices]
                      if dataset.sky_vals is not None else None)
 
@@ -399,8 +372,7 @@ class _RawFluxDataset(Dataset):
         arr = np.asarray(np.load(fp, mmap_mode='r', allow_pickle=True),
                          dtype=np.float32)
         if self.skys is not None:
-            arr = arr - self.skys[k]           # before the x3, as in __getitem__
-        arr = arr * self.scales[k]
+            arr = arr - self.skys[k]           # as in __getitem__
         return torch.from_numpy(arr.reshape(-1))
 
 

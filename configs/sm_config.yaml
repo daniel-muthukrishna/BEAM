@@ -13,24 +13,18 @@ model:
   time_dim: 128          # Fourier time-feature width (the archived V1 trainer hardcoded 64)
   context_dim: 64        # cross-attention token width (the archived V1 trainer hardcoded 64)
   use_cross_attn: False   # A/B flag — set False to train the FiLM-only model
-  t_sampler: "logit_normal"      # Base sampler: "uniform" or "logit_normal" (SD3 recipe;
-                            # appropriate now that compute_stats confirms ~unit-scale data)
-  t_logit_mean: 0.0         # NEW: logit-normal location (t = sigmoid(N(mean, std)))
-  t_logit_std: 1.06         # NEW: logit-normal scale (both ignored for "uniform")
-  # Low-t boost — MEASURED motivation (epoch-249 offline eval): flux error of the
-  # implied x̂₁ is ~0 above t=0.1 and rises to RMS 0.20 / bias +0.036 below t=0.01;
-  # the c->flux map is undertrained exactly where uniform puts 5% of samples (and
-  # logit_normal(0,1) only 0.16%). The boost redraws a fraction of each batch's t
-  # log-uniformly over the measured band:
-  t_low_boost_prob: 0.0   # NEW: fraction of samples redirected to the low-t band
-  t_low_boost_min: 0.001    # NEW: band lower edge
-  t_low_boost_max: 0.1      # NEW: band upper edge (flux errors ~vanish above this)
+  t_sampler: "uniform"     # Base sampler: "uniform", "logit_normal", "uniform_sigma", "theta_uniform"
+                            
+  t_logit_mean: 0.0         #logit-normal location (t = sigmoid(N(mean, std)))
+  t_logit_std: 1.06         #logit-normal scale (both ignored for "uniform")
+  t_low_boost_prob: 0.0   #fraction of samples redirected to the low-t band
+  t_low_boost_min: 0.001    # band lower edge
+  t_low_boost_max: 0.1      # band upper edge 
+  sigma_min: 0.002           # minimum sigma for the uniform_sigma sampler
 
 # Data parameters
 data:
-  # AUDIT: _FIXED pickle regenerated 2026-07-07 after correcting the camera-Moon
-  # column indexing bug in process_angles.py (M{cam} columns previously read the
-  # wrong .out columns — E{cam-1} values). Do not train against the old pickle.
+
   angle_path: /pdo/users/djtufto/angles_O11-116_allcams_data_FIXED.pkl
   ccd_folder:
     - /pdo/users/djtufto/cam3/tica/O11-116/256x256  # Folder containing processed images
@@ -39,11 +33,7 @@ data:
   repeat_factor: 1       # Iterate repeat_factor times over the dataset each epoch
   orbit_threshold: 45    # Split training and validation at this orbit number (exclusive to train)
   orbit_max: 54          # Maximum orbit number to include in validation (inclusive to validation)
-  # AUDIT: orbit_skip removed — it was never read by the training pipeline
-  # (only the archived StarDataset accepted it).
-  # AUDIT: hand-set mean/std keys REMOVED — a stale hand-set std (0.05 vs the true
-  # ~0.72) is exactly how the 14x-off normalization happened. Stats must now come
-  # from compute_stats or stats_path; training refuses to start otherwise.
+  
   compute_stats: True    # One GPU pass over the TRAIN split before training computes the
                          # mean/std of exposure-equalized flux; saved to <save_dir>/image_stats.pkl
   stats_path: null       # Alternative to compute_stats: path to an existing image_stats.pkl
@@ -51,7 +41,7 @@ data:
   stats_max_images: null # Evenly-spaced file cap for the stats pass (null = all)
   camera_number: '3'     # AUDIT: informational only for training (camera comes from each
                          # filename; folder choice selects the camera). Used by generation.
-  add_exposure_flag: False   # append ±1 feature marking the orbit>61 (x3 flux) regime
+  add_exposure_flag: False   # append ±1 feature marking the orbit>=61 (10-minute and shorter cadence) regime
   normalize_context: True   # standardize conditioning with train-orbit statistics
 
 ema:

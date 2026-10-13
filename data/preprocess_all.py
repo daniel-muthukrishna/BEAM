@@ -35,6 +35,23 @@ SECTOR_TO_ORBIT = {
 
 ORBIT_TO_SECTOR = {o: s for s, orbits in SECTOR_TO_ORBIT.items() for o in orbits}
 
+# Effective exposure (header EXPTIME, seconds) of a 30-minute FFI. Processed images
+# are scaled to this exposure so every cadence shares one flux scale.
+REFERENCE_EXPTIME = 1425.6
+
+
+def exposure_factor(exptime: float) -> int:
+    """
+    Args: the EXPTIME header value of an FFI, in seconds
+    Returns: the factor that scales its flux to a 30-minute FFI
+            (1 for 30-minute, 3 for 10-minute, 9 for 200-second FFIs)
+    """
+    ratio = REFERENCE_EXPTIME / exptime
+    factor = round(ratio)
+    if factor < 1 or abs(ratio - factor) > 1e-3:
+        raise ValueError(f"Unexpected EXPTIME {exptime} s")
+    return factor
+
 
 def show_img(
     arr: np.ndarray,
@@ -109,8 +126,12 @@ class Preprocessing:
         sector_end=64,
         camera_number='3',
         skip_sectors: Optional[List[int]] = None,
+        equalize_exposure=True,
+        skip_existing=False,
     ):
         self.skip_sectors = {int(o) for o in (skip_sectors or [])}
+        self.equalize_exposure = equalize_exposure
+        self.skip_existing = skip_existing
         self.fits_root_folder = fits_root_folder
         self.angle_folder = angle_folder
         self.ccd_folder = ccd_folder
@@ -441,6 +462,12 @@ class Preprocessing:
             if ffi_num not in self.data_dic:
                 print(f"No angle data for {ffi_num}")
                 return  # Skip processing if no angle data
+            out_path = os.path.join(
+                self.ccd_folder,
+                f"{fits_filename.rsplit('.', 2)[0]}_processed_im{self.image_size}x{self.image_size}",
+            )
+            if self.skip_existing and os.path.exists(out_path):
+                return
             # if self.data_dic[ffi_num]["below_sunshade"] == False:
             #     return  # Skip processing if image is not below sunshade
             # elif self.data_dic[ffi_num]["below_sunshade"] == False:
@@ -456,8 +483,16 @@ class Preprocessing:
                 background_avg_image = pickle.load(file)
             arr = arr - background_avg_image
                 
-            # Pixel scaling
-            scale_factor = 1 / 633118 / 5.3
+            # Pixel scaling (TICA pixels are already electrons per frame; no gain factor)
+            scale_factor = 1 / 633118
+            if self.equalize_exposure:
+                # Scale to a 30-minute exposure, so the loader applies no cadence factor
+                exptime = fits.getval(
+                    os.path.join(folder_path, f"cam{self.camera_number}-ccd1", fits_filename),
+                    "EXPTIME",
+                    ext=0,
+                )
+                scale_factor *= exposure_factor(exptime)
             arr *= scale_factor
             # Save debug images if requested
             if self.display_images_folder and not os.listdir(
@@ -473,14 +508,12 @@ class Preprocessing:
                         f"{ffi_num}_im{self.image_size}x{self.image_size}.png",
                     ),
                 )
-            # Save as pickle
-            out_path = os.path.join(
-                self.ccd_folder,
-                f"{fits_filename.rsplit('.', 2)[0]}_processed_im{self.image_size}x{self.image_size}",
-            )
-
-            with open(out_path, "wb") as file:
+            # Save as pickle; write under a temporary name so an interrupted run
+            # never leaves a partial file that skip_existing would keep
+            tmp_path = os.path.join(self.ccd_folder, f".tmp_{os.path.basename(out_path)}")
+            with open(tmp_path, "wb") as file:
                 pickle.dump(arr, file)
+            os.replace(tmp_path, out_path)
             # np.save(out_path, arr, allow_pickle=False)
         except Exception as e:
             print(f"Error processing {fits_filename}: {e}")
@@ -528,6 +561,8 @@ def main():
         sector_end=config.get("sector_end", config.get("orbit_end", 32)),
         camera_number=config.get("camera_number", "1"),
         skip_sectors=config.get("skip_sectors", config.get("skip_orbits", [])),
+        equalize_exposure=config.get("equalize_exposure", True),
+        skip_existing=config.get("skip_existing", False),
     )
     # CLI flags
     preproc.run(

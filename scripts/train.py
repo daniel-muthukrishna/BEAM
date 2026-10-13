@@ -93,7 +93,7 @@ def prepare_dataset(config):
     with open(stats_path, 'wb') as f:
         pickle.dump({
             'mean': mean, 'std': std,
-            'definition': 'normalized = (3^[orbit>61] * raw_flux - mean) / std',
+            'definition': 'normalized = (flux - mean) / std, flux as stored (30-minute exposure units)',
         }, f)
     print(f"Saved image stats to {stats_path}")
 

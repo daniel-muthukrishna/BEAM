@@ -2,9 +2,9 @@
 """
 BEAM: Background Elimination with Advanced Machine learning - Generation Script
 
-Generates scattered-light images directly from a trained V2 model using the
+Generates scattered-light images directly from a trained model using the
 ODE (architecture 'flow', adaptive dopri5) or SDE (architectures 'noise' /
-'score' / 'v', Euler-Maruyama) form of the model. No Langevin correction.
+'score' / 'v', Euler-Maruyama) form of the model.
 
 Paths and sampling knobs live in the generation config
 (configs/generation_config.yaml, 'generation:' section); every value there can
@@ -60,6 +60,10 @@ from beam.models.probabilitypath import GaussianProbabilityPath, OTAlpha, OTBeta
 from beam.models.simulator import ODE, SDE, ODEIntegrator, EulerMaruyama
 from beam.utils.config import load_config, flatten_config
 from beam.data.datasets import TESSDataset_angles_only
+
+# Training files are (FFI - background) / 633118, scaled to a 30-minute exposure
+# (1425.6 s effective), so this one factor converts them to e-/s for every cadence.
+E_PER_S_PER_UNIT = 633118 / 1425.6
 
 
 def sector_to_orbits(sector: int) -> set:
@@ -304,9 +308,8 @@ def run_worker(worker_idx, run):
 
         for i, (ffi, orbit, _) in enumerate(chunk):
             sector = orbit_to_sector(orbit)
-            # cadence unnormalizing
-            expo = 3.0 if orbit > 61 else 1.0
-            raw = (gen[i] * run["img_std"] + run["img_mean"]) / expo
+            # denormalize, then convert to e-/s
+            raw = (gen[i] * run["img_std"] + run["img_mean"]) * E_PER_S_PER_UNIT
 
             # potentially helpful metadata
             header = fits.Header()
@@ -322,7 +325,7 @@ def run_worker(worker_idx, run):
             )
             header["IMGMEAN"] = run["img_mean"]
             header["IMGSTD"] = run["img_std"]
-            header["EXPOFACT"] = expo
+            header["BUNIT"] = "electron/s"
             header["CKPT"] = os.path.basename(run["checkpoint_path"])
             header["EMA"] = args.use_ema
 
