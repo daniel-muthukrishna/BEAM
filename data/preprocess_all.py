@@ -128,10 +128,14 @@ class Preprocessing:
         skip_sectors: Optional[List[int]] = None,
         equalize_exposure=True,
         skip_existing=False,
+        existing_folders: Optional[List[str]] = None,
     ):
         self.skip_sectors = {int(o) for o in (skip_sectors or [])}
         self.equalize_exposure = equalize_exposure
         self.skip_existing = skip_existing
+        # skip_existing also looks here, so a run can write only the missing images
+        # into a fresh ccd_folder
+        self.existing_folders = list(existing_folders or [])
         self.fits_root_folder = fits_root_folder
         self.angle_folder = angle_folder
         self.ccd_folder = ccd_folder
@@ -466,7 +470,10 @@ class Preprocessing:
                 self.ccd_folder,
                 f"{fits_filename.rsplit('.', 2)[0]}_processed_im{self.image_size}x{self.image_size}",
             )
-            if self.skip_existing and os.path.exists(out_path):
+            if self.skip_existing and any(
+                os.path.exists(os.path.join(folder, os.path.basename(out_path)))
+                for folder in [self.ccd_folder] + self.existing_folders
+            ):
                 return
             # if self.data_dic[ffi_num]["below_sunshade"] == False:
             #     return  # Skip processing if image is not below sunshade
@@ -563,6 +570,7 @@ def main():
         skip_sectors=config.get("skip_sectors", config.get("skip_orbits", [])),
         equalize_exposure=config.get("equalize_exposure", True),
         skip_existing=config.get("skip_existing", False),
+        existing_folders=config.get("existing_folders", []),
     )
     # CLI flags
     preproc.run(

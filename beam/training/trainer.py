@@ -1,45 +1,5 @@
 """
 Training functionality for score/flow based diffusion models — V2.
-
-Drop-in replacement for beam/training/trainer.py (class name unchanged).
-
-Summary of updates vs trainer.py (marked "UPDATE" at each site):
-
- 1. Validation loss is now a PLAIN MEAN over all validation batches.
-    Previously it was an EMA with weight = ema_beta (0.9999), meaning each new
-    batch contributed 0.01% — the "validation loss" was essentially the FIRST
-    batch's loss, and best-checkpoint selection / early stopping were keyed
-    off near-single-batch noise.
-
- 2. Validation is DETERMINISTIC: t is a stratified grid and the noise / drop
-    mask are drawn from a fixed-seed generator, so epoch-to-epoch validation
-    losses are comparable. The mask is all-zeros (fully conditional) because
-    conditioning fidelity is what we select checkpoints on.
-
- 3. Validation runs on the EMA WEIGHTS (store -> copy_to -> restore around the
-    loop). Previously raw weights were validated while EMA weights were used
-    for sampling — the checkpoint monitor was scoring the wrong model.
-
- 4. Per-t-bin validation losses are computed and returned in the epoch logs
-    (keys 'valid_loss_t_bin_i'), so W&B shows WHERE along the path the model
-    is weak (use WeightsAndBiasesCallback to log them).
-
- 5. train_epoch() calls self.model.train() — previously validate_epoch() set
-    eval() and nothing ever set train() again, so all epochs after the first
-    ran in eval mode (currently benign since the U-Net has no dropout/BN, but
-    a landmine).
-
- 6. The train-loss display EMA now uses config 'training_loss_display_ema'
-    (default 0.98) instead of ema_beta=0.9999, which lagged so hard the
-    reported train loss barely moved within an epoch.
-
- 7. Model construction uses the V2 modules (unet / interpolant) and new
-    config keys: model_emb_dim, model_time_dim, model_context_dim,
-    model_use_cross_attn, model_t_sampler.
-
- 8. Conditioning-normalization statistics from the dataset are saved to
-    context_stats.pkl next to the checkpoints so generation reuses the exact
-    training encoding.
 """
 
 import os
@@ -183,15 +143,7 @@ class SMTrainer:
         """
         Create and initialize diffusion model.
 
-        UPDATE: builds the V2 ContextUnet (fused conditioning embedding,
-        adaLN-Zero, per-parameter context tokens, optional cross-attention)
-        and the V2 ScoreMatch (t-sampler choice, deterministic-validation
-        support). New config keys, all with safe defaults:
-            model_emb_dim        (256)  — fused conditioning embedding width
-            model_time_dim       (128)  — Fourier time-feature width
-            model_context_dim    (64)   — cross-attention token width
-            model_use_cross_attn (True) — A/B flag for cross-attention
-            model_t_sampler      ('logit_normal' | 'uniform')
+
         """
         # Get conditioning dimension from dataset
         sample = self.train_dataset[0]
@@ -217,14 +169,14 @@ class SMTrainer:
             drop_prob=self.config['model_drop_prob'],
             epsilon=self.config['model_epsilon'],
             architecture=self.config['model_architecture'],
-            t_sampler=self.config.get('model_t_sampler', 'logit_normal'),
-            # UPDATE: t-distribution shape knobs (see interpolant._sample_t).
+            t_sampler=self.config['model_t_sampler'],
+            # Ut-distribution shape knobs (see interpolant._sample_t).
             logit_normal_mean=self.config.get('model_t_logit_mean', 0.0),
             logit_normal_std=self.config.get('model_t_logit_std', 1.0),
             low_t_boost_prob=self.config.get('model_t_low_boost_prob', 0.0),
             low_t_boost_min=self.config.get('model_t_low_boost_min', 0.001),
             low_t_boost_max=self.config.get('model_t_low_boost_max', 0.1),
-            # UPDATE (sigma-starvation fix): floor of the uniform-sigma draw;
+            #  floor of the uniform-sigma draw;
             # only used when model_t_sampler == 'uniform_sigma'.
             sigma_min=self.config.get('model_sigma_min', 0.002),
         )
@@ -250,9 +202,7 @@ class SMTrainer:
         """
         Save information about training and validation dataset splits.
 
-        UPDATE: also saves the conditioning-normalization statistics
-        (context_stats.pkl) so generation-side code encodes conditioning
-        exactly as training did.
+        Also saves the conditioning-normalization statistics
         """
         # Only save if this is the main process
         if self.rank != 0:
@@ -269,7 +219,6 @@ class SMTrainer:
                 return [base.ffi_nums[idx] for idx in dataset.indices]
             return list(base.ffi_nums)
 
-        # UPDATE: persist conditioning stats
         base = get_base(self.train_dataset)
         if getattr(base, 'context_mean', None) is not None:
             stats_path = os.path.join(self.save_dir, 'context_stats.pkl')
@@ -358,17 +307,14 @@ class SMTrainer:
         Returns:
             EMA of the training loss for the epoch (display only)
         """
-        # UPDATE: validate_epoch() puts the model in eval mode; previously
-        # nothing ever set train() again, so every epoch after the first ran
-        # in eval mode.
+       
         self.model.train()
 
         # Set epoch for distributed sampling
         if self.world_size > 1 and isinstance(self.train_loader.sampler, DistributedSampler):
             self.train_loader.sampler.set_epoch(self.current_epoch)
 
-        # UPDATE: display EMA decoupled from the weight-EMA decay. 0.9999 made
-        # the reported loss essentially frozen at its first-batch value.
+        # Display EMA decoupled from the weight-EMA decay. 
         ema_weight = self.config.get('training_loss_display_ema', 0.98)
         loss_ema_train = None
 
@@ -417,25 +363,6 @@ class SMTrainer:
         """
         Validate the model on the validation dataset.
 
-        UPDATE — this method is rebuilt (see module docstring, items 1-4):
-          - plain mean over all batches (was: EMA with weight 0.9999, i.e.
-            effectively the first batch only),
-          - deterministic: stratified t grid + fixed-seed noise, so losses are
-            comparable across epochs and checkpoint selection is meaningful,
-          - fully-conditional drop mask (zeros) — we select on conditioning
-            fidelity,
-          - runs on EMA weights (the weights actually used for sampling),
-          - returns (valid_loss, per-t-bin losses).
-
-        UPDATE (sigma-binned validation): VP-path runs trained with
-        t_sampler='uniform_sigma' additionally report loss and flux error
-        binned by the noise level sigma = sqrt(1-t^2), on log-spaced sigma
-        edges matching scripts/probe_vloss_vs_sigma.py's readout. Half the
-        stratified grid is drawn log-uniformly in sigma for these runs so the
-        low-sigma bins (unreachable from a uniform-t grid, whose 1-eps clamp
-        floors sigma at ~0.014) are populated every batch. For all other runs
-        the grid and the returned sigma lists ([] / []) are unchanged.
-
         Returns:
             Tuple of (mean validation loss, per-t-bin mean losses,
             per-t-bin mean flux errors, per-sigma-bin mean losses,
@@ -444,12 +371,11 @@ class SMTrainer:
         """
         self.model.eval()
 
-        # UPDATE: evaluate the EMA weights — these are what sampling uses.
+        #Load EMA weights
         self.ema.store(self.model)
         self.ema.copy_to(self.model)
 
-        # UPDATE: fixed-seed generator (CPU for maximal compatibility; tensors
-        # are moved to device after drawing) -> identical t/noise every epoch.
+    
         seed = int(self.config.get('training_valid_seed', 42))
         gen = torch.Generator()
         gen.manual_seed(seed)
@@ -462,20 +388,13 @@ class SMTrainer:
         bin_sums = torch.zeros(num_bins, device=self.device)
         bin_counts = torch.zeros(num_bins, device=self.device)
 
-        # UPDATE (flux metric): log-spaced bins at low t for the flux-error
-        # diagnostic — the image's mean-flux component resolves at
-        # t ~ (1/sqrt(N_pix))/sigma_flux ≈ 0.005, so linear bins have no
-        # resolution where this metric matters. Bin i covers
-        # [FLUX_EDGES[i], FLUX_EDGES[i+1]).
+        # (flux metric): log-spaced bins at low t for the flux-error
         flux_edges = torch.tensor([0.0, 0.003, 0.01, 0.03, 0.1, 0.3, 0.6, 1.0],
                                   device=self.device)
         flux_sums = torch.zeros(len(flux_edges) - 1, device=self.device)
         flux_counts = torch.zeros(len(flux_edges) - 1, device=self.device)
 
-        # UPDATE (sigma-binned validation): sigma = beta(t) = sqrt(1-t^2) on
-        # the VP path. Edges are log-spaced at LOW sigma — the probe measured
-        # the held-out v-error climbing below sigma ~ 0.05 (flat above ~0.1),
-        # which is exactly the band uniform_sigma training was added to fix.
+        # (sigma-binned validation): sigma = beta(t) for VP path
         sigma_mode = (self.config['model_architecture'] != 'flow'
                       and self.config.get('model_t_sampler', 'logit_normal') == 'uniform_sigma')
         sigma_min = float(self.config.get('model_sigma_min', 0.002))
@@ -493,18 +412,10 @@ class SMTrainer:
                 cam_valid = data_batch['cam'].to(self.device, non_blocking=True)
                 B = x_valid.shape[0]
 
-                # UPDATE: stratified t over (eps, 1-eps) — one sample per
-                # sub-interval, jittered by the seeded generator. Covers the
-                # whole path every batch with low variance.
+               
                 t = (torch.arange(B, dtype=torch.float32) + torch.rand(B, generator=gen)) / B
                 t = t.clamp(eps, 1.0 - eps)
-                # UPDATE (sigma-binned validation): odd samples get a
-                # log-uniform-stratified sigma over [sigma_min, 1) with
-                # t = sqrt(1-sigma^2). Even samples keep their uniform-t
-                # strata (indices 0,2,4,... still span the whole path), so the
-                # low-t flux bins stay populated. Mirroring _sample_t, the
-                # sigma half takes no upper t clamp — sigma_min is the trained
-                # floor and sets the highest meaningful t.
+                # sigma-binned validation:
                 n_sig = B // 2 if sigma_mode else 0
                 if n_sig > 0:
                     u = (torch.arange(n_sig, dtype=torch.float32)
@@ -513,10 +424,8 @@ class SMTrainer:
                     t[1::2] = torch.sqrt(1.0 - sig ** 2).clamp_min(eps)
                 t = t.view(B, 1, 1, 1).to(self.device)
 
-                # UPDATE: fixed noise from the seeded generator.
                 noise = torch.randn(x_valid.shape, generator=gen).to(self.device)
 
-                # UPDATE: fully-conditional mask (0 = keep conditioning).
                 mask = torch.zeros(B, 1, c_valid.shape[2], device=self.device, dtype=c_valid.dtype)
 
                 with torch.autocast('cuda', enabled=self.use_amp, dtype=self.mp_dtype):
@@ -530,18 +439,18 @@ class SMTrainer:
                 total_loss += per_sample.sum()
                 total_count += B
 
-                # UPDATE: per-t-bin accumulation for diagnostics.
+                #per t bin accumulation for diagnostics
                 idx = (t_used.float() * num_bins).long().clamp(0, num_bins - 1)
                 bin_sums.index_add_(0, idx, per_sample)
                 bin_counts.index_add_(0, idx, torch.ones_like(per_sample))
 
-                # UPDATE (flux metric): same accumulation on log-spaced bins.
+                # (flux metric): same accumulation on log-spaced bins.
                 fidx = (torch.bucketize(t_used.float(), flux_edges) - 1).clamp(0, len(flux_edges) - 2)
                 flux_sums.index_add_(0, fidx, flux_err.float())
                 flux_counts.index_add_(0, fidx, torch.ones_like(flux_err.float()))
 
-                # UPDATE (sigma-binned validation): same accumulations keyed
-                # by the VP noise level (both grid halves contribute).
+                # (sigma-binned validation): same accumulations keyed
+                # by the VP noise level (both grid halves contribute)
                 if sigma_mode:
                     sigma_used = torch.sqrt((1.0 - t_used.float() ** 2).clamp_min(0.0))
                     sidx = (torch.bucketize(sigma_used, sigma_edges) - 1).clamp(0, len(sigma_edges) - 2)
@@ -550,7 +459,6 @@ class SMTrainer:
                     sigma_flux_sums.index_add_(0, sidx, flux_err.float())
                     sigma_flux_counts.index_add_(0, sidx, torch.ones_like(flux_err.float()))
 
-        # UPDATE: restore the raw (non-EMA) weights before training resumes.
         self.ema.restore(self.model)
 
         # Sync across GPUs (sums, so the result is the true global mean).
@@ -630,8 +538,6 @@ class SMTrainer:
     ) -> Tuple[List[float], List[float]]:
         """
         Train the model for the specified number of epochs.
-        (Only change: validate_epoch now returns per-t-bin losses which are
-        added to the epoch logs for the W&B callback.)
         """
         n_epoch = n_epoch or self.config['training_n_epoch']
 
@@ -670,7 +576,6 @@ class SMTrainer:
             train_loss = self.train_epoch()
             self.loss_history_train.append(train_loss)
 
-            # UPDATE: deterministic, EMA-weighted validation with t-bin diagnostics.
             (valid_loss, valid_t_bins, valid_flux_bins,
              valid_sigma_bins, valid_sigma_flux_bins) = self.validate_epoch()
             self.loss_history_valid.append(valid_loss)
@@ -694,18 +599,13 @@ class SMTrainer:
                 "best_valid_loss": self.best_valid_loss,
                 "epochs_without_improvement": self.epochs_without_improvement
             }
-            # UPDATE: expose per-t-bin validation losses to callbacks
-            # (logged to W&B by WeightsAndBiasesCallback).
+            #validation metrics to give to wandb
             for i, v in enumerate(valid_t_bins):
                 logs[f"valid_loss_t_bin_{i}"] = v
-            # UPDATE (flux metric): squared spatial-mean (flux) error of the
-            # implied x̂₁, on log-spaced t bins
-            # [0, .003, .01, .03, .1, .3, .6, 1.0] — bin i = edges[i]..edges[i+1].
+            
             for i, v in enumerate(valid_flux_bins):
                 logs[f"valid_flux_err_t_bin_{i}"] = v
-            # UPDATE (sigma-binned validation): present only for VP-path
-            # uniform_sigma runs; sigma edges
-            # [0, .003, .01, .03, .1, .3, .6, 1.0] — bin i = edges[i]..edges[i+1].
+      
             for i, v in enumerate(valid_sigma_bins):
                 logs[f"valid_loss_sigma_bin_{i}"] = v
             for i, v in enumerate(valid_sigma_flux_bins):
