@@ -4,7 +4,7 @@ Estimate TESS stray light for any time or sector.
 
 ## Access
 
-The server runs on **pdogpu6** and only listens on that machine, so you reach it through an SSH tunnel. Anyone with a PDO account can use it.
+The server runs on **pdogpu6** and currently only accepts local users. From any machine with pdo access:
 
 1. Open the tunnel from your own computer:
 
