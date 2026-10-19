@@ -3,6 +3,7 @@ Dataset classes for TESS image data
 
 Conditioning encoding feature layout: (16 features, standardized to zero mean / unit variance)
 [1/ED, 1/MD, 1/ED^2, 1/MD^2, Eel,  sin(Eaz),  cos(Eaz), Mel,  sin(Maz),  cos(Maz), Ecam_el, sin(Ecam_az), cos(Ecam_az), Mcam_el, sin(Mcam_az), cos(Mcam_az)]
+    then, with add_phase_features, [cos(Ephase), cos(Mphase)] (Sun-Earth-TESS and Sun-Moon-TESS angles),
     followed (optionally) by the exposure flag and patch-location embedding.
 
  Exposure flag indicator value: 1.0 if orbit >= 61, -1.0 otherwise
@@ -25,23 +26,26 @@ from torch.utils.data import Dataset, Subset, DataLoader
 from tqdm import tqdm
 
 
-def build_context_features(angles: Dict, camera: str) -> np.ndarray:
+def build_context_features(angles: Dict, camera: str, phase: bool = False) -> np.ndarray:
     """
-    12 parameter geometric info -> 16 features
+    12 parameter geometric info -> 16 features, plus the 2 phase features if phase is True
     """
     e_az = angles['Eaz']
     m_az = angles['Maz']
     ec_az = angles['E' + camera + 'az']
     mc_az = angles['M' + camera + 'az']
 
-    return np.array([
+    features = [
         angles['1/ED'], angles['1/MD'],
         angles['1/ED^2'], angles['1/MD^2'],
         angles['Eel'], math.sin(e_az), math.cos(e_az),
         angles['Mel'], math.sin(m_az), math.cos(m_az),
         angles['E' + camera + 'el'], math.sin(ec_az), math.cos(ec_az),
         angles['M' + camera + 'el'], math.sin(mc_az), math.cos(mc_az),
-    ], dtype=np.float64)
+    ]
+    if phase:
+        features += [math.cos(angles['Ephase']), math.cos(angles['Mphase'])]
+    return np.array(features, dtype=np.float64)
 
 
 CONTEXT_FEATURE_NAMES = [
@@ -51,6 +55,7 @@ CONTEXT_FEATURE_NAMES = [
     'Ecam_el', 'sin(Ecam_az)', 'cos(Ecam_az)',
     'Mcam_el', 'sin(Mcam_az)', 'cos(Mcam_az)',
 ]
+PHASE_FEATURE_NAMES = ['cos(Ephase)', 'cos(Mphase)']
 
 
 class TESSDataset(Dataset):
@@ -72,6 +77,9 @@ class TESSDataset(Dataset):
         normalize_context: bool = True,
         sky_by_sector: Optional[Dict[int, float]] = None,
         zero_context: bool = False,
+        exclude_list: Optional[str] = None,
+        clip_min: Optional[float] = None,
+        add_phase_features: bool = False,
     ):
         start_time = time.time()
         # Define paths and parameters
@@ -86,19 +94,15 @@ class TESSDataset(Dataset):
         self.camera_number = camera_number
 
         self.add_exposure_flag = add_exposure_flag
+        self.add_phase_features = add_phase_features
         self.normalize_context = normalize_context
-        # Sky normalization: per-SECTOR scalar sky level (native pkl units)
-        # subtracted at load time. Sky is constant within a sector to <2 e/s
-        # but spans ~0.03-0.10 across sectors; subtracting it makes a smooth
-        # pedestal out-of-distribution instead of "some other sector's
-        # zodiacal level". Sector comes from the angle data:
-        # sector = (orbit - 7) // 2.
+
         self.zero_context = zero_context
         self.sky_by_sector = ({int(k): float(v) for k, v in sky_by_sector.items()}
                               if sky_by_sector is not None else None)
         self.context_mean: Optional[np.ndarray] = None
         self.context_std: Optional[np.ndarray] = None
-        self.context_feature_names = list(CONTEXT_FEATURE_NAMES)
+        self.context_feature_names = list(CONTEXT_FEATURE_NAMES) + (PHASE_FEATURE_NAMES if add_phase_features else [])
 
         if self.patch_size is not None:
             assert self.image_shape[0] % self.patch_size[0] == 0, "Image shape must be divisible by patch size"
@@ -113,8 +117,18 @@ class TESSDataset(Dataset):
 
         # Load orbital parameter dictionary
         self.angles_dic = pickle.load(open(self.angle_path, "rb"))
+        if add_phase_features and 'Ephase' not in next(iter(self.angles_dic.values())):
+            raise ValueError(f"{self.angle_path} has no phase angles; make one with data/compute_angles.py "
+                             "or set add_phase_features to false")
         self.MEAN = mean
         self.STD = std
+        self.clip_min = clip_min
+
+        excluded = set()
+        if exclude_list:
+            with open(exclude_list) as file:
+                excluded = {line.strip() for line in file if line.strip() and not line.startswith('#')}
+        n_excluded = 0
 
         # Find all valid image files that have corresponding angle data
         # store files for use in __getitem__
@@ -124,6 +138,9 @@ class TESSDataset(Dataset):
         self.sky_vals = [] if self.sky_by_sector is not None else None
         for folder in self.ccd_folders:
             for filename in os.listdir(folder):
+                if filename in excluded:
+                    n_excluded += 1
+                    continue
                 ffi_num, camera = parse_ffi_camera(filename)
                 if ffi_num in self.angles_dic.keys():
                     if self.sky_by_sector is not None:
@@ -141,7 +158,8 @@ class TESSDataset(Dataset):
         end_time = time.time()
 
         print(f"Indexed {self.length} candidate files (all orbits on disk) across "
-              f"{len(self.ccd_folders)} folder(s) in {end_time - start_time:.2f} s. ")
+              f"{len(self.ccd_folders)} folder(s) in {end_time - start_time:.2f} s. "
+              + (f"Left out {n_excluded} frames listed in {exclude_list}." if exclude_list else ""))
 
     #now computing dataset stats at train time to make bookkeeping easier
     def compute_context_stats(self, indices: Optional[List[int]] = None) -> Tuple[np.ndarray, np.ndarray]:
@@ -149,7 +167,7 @@ class TESSDataset(Dataset):
         if indices is None:
             indices = range(self.length)
         rows = np.stack([
-            build_context_features(self.angles_dic[self.ffi_nums[i]], self.cameras[i])
+            build_context_features(self.angles_dic[self.ffi_nums[i]], self.cameras[i], self.add_phase_features)
             for i in indices
         ])
         mean = rows.mean(axis=0)
@@ -166,6 +184,7 @@ class TESSDataset(Dataset):
             'std': self.context_std,
             'feature_names': self.context_feature_names,
             'add_exposure_flag': self.add_exposure_flag,
+            'add_phase_features': self.add_phase_features,
         }
 
     def _get_mmap(self, path, cache):
@@ -197,7 +216,7 @@ class TESSDataset(Dataset):
         angles = self.angles_dic[ffi_num]
         orbit = angles['orbit']
 
-        params = build_context_features(angles, camera)
+        params = build_context_features(angles, camera, self.add_phase_features)
         if self.normalize_context and self.context_mean is not None:
             params = (params - self.context_mean) / self.context_std
         context = torch.from_numpy(params.astype(np.float32))
@@ -223,14 +242,14 @@ class TESSDataset(Dataset):
 
         arr = np.asarray(image_arr, dtype=np.float32).reshape(
             self.image_shape if self.patch_size is None else self.patch_size)
+        if self.clip_min is not None:
+            arr = np.maximum(arr, self.clip_min)
         if self.sky_vals is not None:
             arr = arr - self.sky_vals[idx]     # sky is in pkl units
         ffi_image = (torch.from_numpy(arr).unsqueeze(0) - self.MEAN) / self.STD
 
         if self.zero_context:
-            # Unconditional model (e.g. the star prior): the image must not be
-            # tied to geometry; zero out the whole conditioning vector
-            # (features + flags + patch location) but keep its length.
+            # Unconditional model .
             context = torch.zeros_like(context)
 
         return {
@@ -257,17 +276,19 @@ class TESSDataset_angles_only(Dataset):
             self.context_mean = np.asarray(context_stats['mean'], dtype=np.float64)
             self.context_std = np.asarray(context_stats['std'], dtype=np.float64)
             self.add_exposure_flag = context_stats.get('add_exposure_flag', True)
+            self.add_phase_features = context_stats.get('add_phase_features', False)
         else:
             # Unnormalized output only valid against a model trained the same way.
             self.context_mean = None
             self.context_std = None
             self.add_exposure_flag = True
+            self.add_phase_features = False
 
     def __getitem__(self, idx: int) -> Dict[str, Union[torch.Tensor, str]]:
         ffi_num = self.ffi_nums[idx]
         angles = self.angles_dic[ffi_num]
 
-        params = build_context_features(angles, self.camera_number)
+        params = build_context_features(angles, self.camera_number, self.add_phase_features)
         if self.context_mean is not None:
             params = (params - self.context_mean) / self.context_std
         context = torch.from_numpy(params.astype(np.float32))
@@ -382,6 +403,7 @@ class _RawFluxDataset(Dataset):
     """
     def __init__(self, dataset: TESSDataset, indices):
         self.files = [dataset.files[i] for i in indices]
+        self.clip_min = dataset.clip_min
         self.skys = ([dataset.sky_vals[i] for i in indices]
                      if dataset.sky_vals is not None else None)
 
@@ -392,6 +414,8 @@ class _RawFluxDataset(Dataset):
         fp = self.files[k]
         arr = np.asarray(np.load(fp, mmap_mode='r', allow_pickle=True),
                          dtype=np.float32)
+        if self.clip_min is not None:
+            arr = np.maximum(arr, self.clip_min)
         if self.skys is not None:
             arr = arr - self.skys[k]           # as in __getitem__
         return torch.from_numpy(arr.reshape(-1))

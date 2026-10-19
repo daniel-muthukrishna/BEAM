@@ -50,13 +50,14 @@ def prepare_dataset(config):
         #conditioning encoding
         add_exposure_flag=config.get('data_add_exposure_flag', True),
         normalize_context=config.get('data_normalize_context', True),
-        # sky-normalized / unconditional variants (star prior). flatten_config
-        # explodes the yaml's data.sky_by_sector mapping into one key per
-        # sector ("data_sky_by_sector_<N>"), so reassemble it here.
+
         sky_by_sector=({int(k.rsplit('_', 1)[1]): float(v)
                         for k, v in config.items()
                         if k.startswith('data_sky_by_sector_')} or None),
         zero_context=config.get('data_zero_context', False),
+        exclude_list=config.get('data_exclude_list'),
+        clip_min=config.get('data_clip_min'),
+        add_phase_features=config.get('data_add_phase_features', False),
     )
 
     print("Creating training and validation splits by orbit...")

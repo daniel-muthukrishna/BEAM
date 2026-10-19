@@ -24,6 +24,10 @@ from beam.models.probabilitypath import GaussianProbabilityPath, OTAlpha, OTBeta
 from beam.utils.visualization import plot_samples, plot_loss_history
 from beam.utils.wandb_utils import log_sample_images
 
+E_PER_S_PER_UNIT = 633118 / 1425.6
+BRIGHTNESS_EDGES = [-float('inf'), 1.0, 10.0, 100.0, 1000.0, float('inf')]
+BRIGHTNESS_LABELS = ['0-1', '1-10', '10-100', '100-1000', '1000+']
+
 
 class SMTrainer:
     """
@@ -381,7 +385,9 @@ class SMTrainer:
             Tuple of (mean validation loss, per-t-bin mean losses,
             per-t-bin mean flux errors, per-sigma-bin mean losses,
             per-sigma-bin mean flux errors — last two empty unless VP path +
-            uniform_sigma)
+            uniform_sigma, flux error by frame brightness as a list of
+            (mean absolute error in e-/s, mean relative error, frame count)
+            per BRIGHTNESS_LABELS bin)
         """
         self.model.eval()
 
@@ -418,6 +424,12 @@ class SMTrainer:
         sigma_loss_counts = torch.zeros(len(sigma_edges) - 1, device=self.device)
         sigma_flux_sums = torch.zeros(len(sigma_edges) - 1, device=self.device)
         sigma_flux_counts = torch.zeros(len(sigma_edges) - 1, device=self.device)
+
+        bright_edges = torch.tensor(BRIGHTNESS_EDGES, device=self.device)
+        bright_abs = torch.zeros(len(BRIGHTNESS_LABELS), device=self.device)
+        bright_rel = torch.zeros(len(BRIGHTNESS_LABELS), device=self.device)
+        bright_counts = torch.zeros(len(BRIGHTNESS_LABELS), device=self.device)
+        data_mean, data_std = float(self.config['data_mean']), float(self.config['data_std'])
 
         with torch.no_grad():
             for data_batch in tqdm(self.valid_loader, desc=f"Validation epoch {self.current_epoch}"):
@@ -473,6 +485,20 @@ class SMTrainer:
                     sigma_flux_sums.index_add_(0, sidx, flux_err.float())
                     sigma_flux_counts.index_add_(0, sidx, torch.ones_like(flux_err.float()))
 
+                # The model's flux for each frame, predicted from pure noise
+                with torch.autocast('cuda', enabled=self.use_amp, dtype=self.mp_dtype):
+                    _, _, start_flux_err = self.model(
+                        x_valid, c_valid, cam=cam_valid,
+                        t=torch.full_like(t, eps), noise=noise, context_mask=mask,
+                        reduction='none',
+                    )
+                true_flux = (x_valid.float().mean(dim=(1, 2, 3)) * data_std + data_mean) * E_PER_S_PER_UNIT
+                abs_err = start_flux_err.float().sqrt() * data_std * E_PER_S_PER_UNIT
+                bidx = (torch.bucketize(true_flux, bright_edges) - 1).clamp(0, len(BRIGHTNESS_LABELS) - 1)
+                bright_abs.index_add_(0, bidx, abs_err)
+                bright_rel.index_add_(0, bidx, abs_err / true_flux.abs().clamp_min(1.0))
+                bright_counts.index_add_(0, bidx, torch.ones_like(abs_err))
+
         self.ema.restore(self.model)
 
         # Sync across GPUs (sums, so the result is the true global mean).
@@ -483,6 +509,9 @@ class SMTrainer:
             dist.all_reduce(bin_counts, op=dist.ReduceOp.SUM)
             dist.all_reduce(flux_sums, op=dist.ReduceOp.SUM)
             dist.all_reduce(flux_counts, op=dist.ReduceOp.SUM)
+            dist.all_reduce(bright_abs, op=dist.ReduceOp.SUM)
+            dist.all_reduce(bright_rel, op=dist.ReduceOp.SUM)
+            dist.all_reduce(bright_counts, op=dist.ReduceOp.SUM)
             if sigma_mode:
                 dist.all_reduce(sigma_loss_sums, op=dist.ReduceOp.SUM)
                 dist.all_reduce(sigma_loss_counts, op=dist.ReduceOp.SUM)
@@ -497,7 +526,10 @@ class SMTrainer:
             sigma_flux_means = (sigma_flux_sums / sigma_flux_counts.clamp(min=1)).cpu().tolist()
         else:
             sigma_means, sigma_flux_means = [], []
-        return valid_loss, bin_means, flux_means, sigma_means, sigma_flux_means
+        n = bright_counts.clamp(min=1)
+        brightness = list(zip((bright_abs / n).cpu().tolist(), (bright_rel / n).cpu().tolist(),
+                              bright_counts.cpu().long().tolist()))
+        return valid_loss, bin_means, flux_means, sigma_means, sigma_flux_means, brightness
 
     def run_checkpoint(self, save_model: bool) -> bool:
         """
@@ -592,7 +624,7 @@ class SMTrainer:
             self.loss_history_train.append(train_loss)
 
             (valid_loss, valid_t_bins, valid_flux_bins,
-             valid_sigma_bins, valid_sigma_flux_bins) = self.validate_epoch()
+             valid_sigma_bins, valid_sigma_flux_bins, valid_brightness) = self.validate_epoch()
             self.loss_history_valid.append(valid_loss)
 
             torch.cuda.empty_cache()
@@ -625,12 +657,21 @@ class SMTrainer:
                 logs[f"valid_loss_sigma_bin_{i}"] = v
             for i, v in enumerate(valid_sigma_flux_bins):
                 logs[f"valid_flux_err_sigma_bin_{i}"] = v
+            for label, low, (abs_err, rel_err, count) in zip(BRIGHTNESS_LABELS, BRIGHTNESS_EDGES, valid_brightness):
+                if count:
+                    logs[f"valid_flux_abs_err_{label}"] = abs_err
+                    if low >= 1:
+                        logs[f"valid_flux_rel_err_{label}"] = rel_err
 
             for callback in self.callbacks:
                 callback.on_epoch_end(self, epoch, logs)
 
             print(f"Epoch {epoch}: Train Loss = {train_loss:.6f}, Valid Loss = {valid_loss:.6f}, "
                   f"Time = {current_time:.2f} hours")
+            print("  Validation flux error by frame brightness in e-/s: " + " | ".join(
+                f"{label}: " + (f"{abs_err:.2f}" + (f" ({rel_err:.0%})" if low >= 1 else "") + f", n={count}"
+                                if count else "no frames")
+                for label, low, (abs_err, rel_err, count) in zip(BRIGHTNESS_LABELS, BRIGHTNESS_EDGES, valid_brightness)))
 
             run_checkpoint = (epoch % checkpoint_freq == 0 or
                               epoch == n_epoch - 1 or
