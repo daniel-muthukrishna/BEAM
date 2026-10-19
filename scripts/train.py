@@ -62,8 +62,7 @@ def prepare_dataset(config):
     print("Creating training and validation splits by orbit...")
     train_dataset, valid_dataset = create_train_valid_datasets_by_orbit(
         tess_dataset,
-        config["data_orbit_threshold"],
-        config["data_orbit_max"],
+        config["data_valid_orbits"],
     )
 
     if config.get('data_compute_stats', False):

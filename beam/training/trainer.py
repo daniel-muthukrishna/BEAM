@@ -15,6 +15,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset, Subset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm.auto import tqdm
+import wandb
 
 # UPDATE: V2 model modules
 from beam.models.unet import ContextUnet
@@ -243,6 +244,19 @@ class SMTrainer:
         with open(os.path.join(self.save_dir, 'validation_dataset_ffinumbers.pkl'), 'wb') as file:
             pickle.dump(validation_dataset_ffis, file)
             print(f"Saved validation dataset FFI numbers to {file.name}")
+
+        # The same FFI number appears once per camera, so also save (FFI number,
+        # camera) pairs, one per frame
+        def get_frames(dataset):
+            base = get_base(dataset)
+            indices = dataset.indices if isinstance(dataset, Subset) else range(len(base.ffi_nums))
+            return list(dict.fromkeys((base.ffi_nums[idx], base.cameras[idx]) for idx in indices))
+
+        if hasattr(base, 'cameras'):
+            for split, dataset in (('training', self.train_dataset), ('validation', self.valid_dataset)):
+                with open(os.path.join(self.save_dir, f'{split}_dataset_frames.pkl'), 'wb') as file:
+                    pickle.dump(get_frames(dataset), file)
+                    print(f"Saved {split} dataset (FFI number, camera) pairs to {file.name}")
 
     def _save_model_info(self) -> None:
         """
@@ -549,7 +563,8 @@ class SMTrainer:
         for callback in self.callbacks:
             callback.on_train_begin(self)
 
-        if self.rank == 0:
+        # Sample logging needs an active W&B run; there is none when W&B is disabled
+        if self.rank == 0 and wandb.run is not None:
             print(f"Logging training samples on GPU {self.rank}")
             model = self.model.module if hasattr(self.model, 'module') else self.model
 

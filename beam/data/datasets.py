@@ -319,27 +319,48 @@ def embed_patch(prow, embed_dim):
     ], dim=-1)
 
 
-def create_train_valid_datasets_by_orbit(dataset: TESSDataset, orbit_threshold: int = 90, max_orbit: int = 100):
+def parse_orbit_ranges(valid_orbits) -> List[Tuple[int, int]]:
+    """
+    Turn a list of orbit ranges into (first, last) pairs, both inclusive.
+    Each entry can be '10-12', [10, 12] or a single orbit like 33.
+    """
+    ranges = []
+    for item in valid_orbits:
+        if isinstance(item, str):
+            first, _, last = item.partition('-')
+            first, last = int(first), int(last or first)
+        elif isinstance(item, (list, tuple)):
+            if len(item) != 2:
+                raise ValueError(f"orbit range {item!r} must have two ends, e.g. [10, 12]")
+            first, last = int(item[0]), int(item[1])
+        else:
+            first = last = int(item)
+        if first > last:
+            raise ValueError(f"orbit range {item!r} starts after it ends")
+        ranges.append((first, last))
+    return ranges
+
+
+def create_train_valid_datasets_by_orbit(dataset: TESSDataset, valid_orbits):
     """
     Create training and validation datasets using orbit number as the split
-    criterion. Orbits <= orbit_threshold go to training, orbits > threshold
-    (and <= max_orbit) go to validation.
+    criterion. Frames whose orbit falls in any of the valid_orbits ranges
+    (e.g. ['10-12', '14-20'], see parse_orbit_ranges) go to validation; every
+    other frame goes to training.
     """
-    train_indices = [
-        idx for idx, ffi_num in enumerate(dataset.ffi_nums)
-        if int(dataset.angles_dic[ffi_num]["orbit"]) <= orbit_threshold
+    ranges = parse_orbit_ranges(valid_orbits)
+    in_valid = [
+        any(first <= int(dataset.angles_dic[ffi_num]["orbit"]) <= last for first, last in ranges)
+        for ffi_num in dataset.ffi_nums
     ]
-    valid_indices = [
-        idx for idx, ffi_num in enumerate(dataset.ffi_nums)
-        if int(dataset.angles_dic[ffi_num]["orbit"]) > orbit_threshold and int(dataset.angles_dic[ffi_num]["orbit"]) <= max_orbit
-    ]
+    train_indices = [idx for idx, v in enumerate(in_valid) if not v]
+    valid_indices = [idx for idx, v in enumerate(in_valid) if v]
+    if not valid_indices:
+        raise ValueError(f"no frames fall in the validation orbits {valid_orbits}")
 
-    n_files = len(dataset.ffi_nums)
-    n_unused = n_files - len(train_indices) - len(valid_indices)
     rep = dataset.repeat_factor
-    print(f"Orbit split (threshold={orbit_threshold}, max={max_orbit}): "
-          f"{len(train_indices)} train / {len(valid_indices)} valid files "
-          f"({n_unused} of {n_files} indexed files are outside the orbit range and UNUSED)"
+    print(f"Orbit split (validation orbits {', '.join(f'{a}-{b}' for a, b in ranges)}, the rest train): "
+          f"{len(train_indices)} train / {len(valid_indices)} valid files"
           + (f"; repeat_factor x{rep} -> {len(train_indices)*rep} / {len(valid_indices)*rep} samples per epoch"
              if rep != 1 else ""))
 

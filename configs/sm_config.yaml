@@ -31,8 +31,8 @@ data:
   image_shape: [256,256] # Shape of the images
   patch_size: null       # Shape of the patches; null for no patches
   repeat_factor: 1       # Iterate repeat_factor times over the dataset each epoch
-  orbit_threshold: 45    # Split training and validation at this orbit number (exclusive to train)
-  orbit_max: 54          # Maximum orbit number to include in validation (inclusive to validation)
+  valid_orbits: [46-54]  # Validation orbits as inclusive ranges, e.g. [10-12, 14-20]; every other
+                         # orbit trains. Sector s = orbits 2s+7 and 2s+8 (sector 2 = orbits 11-12).
   
   compute_stats: True    # One GPU pass over the TRAIN split before training computes the
                          # mean/std of exposure-equalized flux; saved to <save_dir>/image_stats.pkl
