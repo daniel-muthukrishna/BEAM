@@ -142,6 +142,7 @@ def clean(net, y, w, mask, lo, hi, sigmas, cfg, release):
         t = math.sqrt(1 - sigma ** 2)
         eta = lad["step"] * sigma ** 2 / (t ** 2 * K ** 2)
         tau = hold_c * sigma / (t * K)
+        # MAP estimate as a efficient approx of averaging N chains
         for _ in range(lad["steps_per_level"]):
             u = t * (y - U(w)).clamp(lo, hi) # clamp residual to remove preprocessing artifacts                      
             shift = tuple(rng.integers(PATCH, size=2).tolist())

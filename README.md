@@ -1,8 +1,10 @@
-# BEAM: Background Elimination with Advanced Machine learning
+# BEAM: Background Elimination via Additive Modeling
 
 BEAM is a Python package for training and using conditional diffusion models to model and remove systematic effects from image data.
 
 This project models the shape and intensity of scattered light in TESS (Transiting Exoplanet Survey Satellite) full frame images (FFIs), conditioned on the positions of the Earth and Moon relative to the spacecraft. Given only that geometry, a trained model generates the expected scattered-light image for an FFI.
+
+Separately, a model trained on uncontaminated TESS data is used to clean existing observations.
 
 ## Installation
 
@@ -37,8 +39,9 @@ The [releases page](https://github.com/daniel-muthukrishna/BEAM/releases) has a 
   - `image_stats.pkl`: the mean and standard deviation used to normalize the images
   - `checkpoint_epoch_final_*.pth`: the trained weights, including the EMA weights used by default
 - **`angles_O11-116_allcams_data_FIXED.pkl`**: Earth and Moon geometry for every FFI in orbits 11–116 (sectors 2–54), all cameras.
+- **Star-prior model folder** (same layout as above): the camera-3 star prior used to clean FFIs (see [Cleaning FFIs](#cleaning-ffis)).
 
-The model generates 256×256 images of camera 3. It was trained on orbits 11–45 and validated on orbits 46–54; predictions for later orbits are extrapolations.
+The model generates 256×256 images of camera 3. It was trained on orbits 11–45 and validated on orbits 46–54.
 
 ## Generating scattered-light images
 
@@ -58,6 +61,30 @@ python scripts/generate.py --config configs/generation_config.yaml \
 Each FFI is written to `generated_light_s<sector>-<ffi>-cam<camera>.fits` in electrons per second, with the FFI number, orbit, sector and sampler settings in the FITS header. `generation_preview.png` shows up to 16 of the generated images.
 
 Only FFIs listed in the angle file can be generated, since the model's input is that file's geometry for each FFI.
+
+## Cleaning FFIs
+
+`scripts/clean.py` estimates and removes the background of camera-3 TICA FFIs with a camera-3 star-prior model, starting from each frame's processed 256×256 image (from `data/preprocess_all.py`).
+
+1. Set the paths in `configs/clean_config.yaml`:
+   - `model.dir`: the star-prior model folder from the [releases page](https://github.com/daniel-muthukrishna/BEAM/releases)
+   - `data.tica_dir`: the TICA FFIs, found by file name anywhere under this folder
+   - `data.start_dir`: the processed 256×256 images, named `<CCD1 file name without .fits>_processed_im256x256`
+   - `output_dir`: where the results go
+2. List the frames, one `sector ffi` per line (see `configs/clean_frames_example.txt`):
+
+   ```
+   22 00032936
+   22 00033285
+   ```
+
+3. Run it on a GPU:
+
+   ```bash
+   python scripts/clean.py --config configs/clean_config.yaml --frames frames.txt
+   ```
+
+Each frame gets `s<sector>_<ffi>_cam3_beam_background.fits` and `s<sector>_<ffi>_cam3_beam_cleaned.fits`, 4096×4096 in electrons per second.
 
 ## Conditioning
 
@@ -111,8 +138,8 @@ beam/
   models/      U-Net, training objective, probability paths, samplers
   training/    training loop, multi-GPU training, callbacks, W&B logging
   utils/       config loading, plotting, W&B helpers
-configs/       training (sm_config.yaml) and generation (generation_config.yaml) settings
+configs/       training (sm_config.yaml), generation (generation_config.yaml) and cleaning (clean_config.yaml) settings
 data/          preprocessing: TICA FFIs -> training images, altaz tables -> angle file
-scripts/       train.py, generate.py
+scripts/       train.py, generate.py, clean.py
 ```
 

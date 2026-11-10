@@ -9,7 +9,7 @@ model:
   patch_batch: 128       # patches per forward pass 
 
 data:
-  tica_dir: /PATH/TO/TICA/ # TICA FFIs (hlsp_tica_tess_ffi_s<sector>-o<orbit>-<ffi>-cam3-ccd<ccd>_*.fits), searched recursively
+  tica_dir: /PATH/TO/TICA/ # TICA FFIs (hlsp_tica_tess_ffi_s<sector>-o<orbit>-<ffi>-cam3-ccd<ccd>_*.fits)
   start_dir: /PATH/TO/INPUT/ # h, path of classical estimators (preprocessed ests)
   file_unit: 633118      # e- per file unit
   exptime: 1425.6        # s; frames with a different EXPTIME are rejected
@@ -23,10 +23,10 @@ ladder:
   sigma_bottom: 0.01
   levels: 11             # log-spaced
   steps_per_level: 20
-  step: 0.1              # relative step size
+  step: 0.1              # relative step
 
 clip: 2000               # residual clip, e-/s
-highpass: 33             # high-pass filter width, coarse cells
+highpass: 33             # coarse cell filter with
 hold:
-  c: 2.0                 # tau = c * sigma / (t * K)
+  c: 2.0                 # tau = c*sigma/(t * K)
   release: 10.0          # e-/s
