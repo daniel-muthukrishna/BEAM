@@ -10,8 +10,7 @@ from einops import rearrange
 
 class FourierEncoder(nn.Module):
     """
-    Unchanged from unet.py.
-    Based on https://github.com/lucidrains/denoising-diffusion-pytorch/blob/main/denoising_diffusion_pytorch/karras_unet.py#L183
+    Based on https://github.com/lucidrains/denoising-diffusion-pytorch/blob/main/denoising_diffusion_pytorch/karras_unet.py
     """
     def __init__(self, dim: int):
         super().__init__()
@@ -107,8 +106,6 @@ class AttentionBlock(nn.Module):
 
         self.layernorm1 = nn.LayerNorm(dim)
         self.layernorm3 = nn.LayerNorm(dim)
-        # UPDATE: min(32, dim) instead of hard-coded 32, matching ResidualConvBlock,
-        # so small-width configs don't crash.
         self.groupnorm = nn.GroupNorm(min(32, dim), dim)
 
         self.self_attn = SelfAttention(dim, heads)
@@ -117,9 +114,6 @@ class AttentionBlock(nn.Module):
             self.cross_attn = CrossAttention(dim, context_dim, heads)
         self.ffn = AttentionFFN(dim, mlp_dim)
 
-        # UPDATE: cache for the positional embedding, keyed by (H, W).
-        # Plain dict (not a buffer): it is deterministic and cheap to rebuild,
-        # so it should not enter the state_dict.
         self._pe_cache = {}
 
     def _pos_emb(self, H: int, W: int, device) -> torch.Tensor:
@@ -138,8 +132,6 @@ class AttentionBlock(nn.Module):
 
         # Self Attention Block B, C, H, W -> B, (H*W), C
         x = rearrange(x, 'b c h w -> b (h w) c')
-        # UPDATE: inject explicit positional information before attention.
-        # Cast to x.dtype so bf16 autocast tensors are not silently promoted to fp32.
         x = x + self._pos_emb(H, W, x.device).to(x.dtype).unsqueeze(0)
 
         attn_skip = x  # short skip connection
@@ -147,7 +139,7 @@ class AttentionBlock(nn.Module):
         x = self.self_attn(x)
         x = x + attn_skip
 
-        # Cross Attention Block (UPDATE: optional)
+        # Cross Attention Block (optional)
         if self.use_cross_attn and context is not None:
             cross_skip = x
             x = self.layernorm2(x)
@@ -367,7 +359,6 @@ class ConditioningEmbedding(nn.Module):
         self.context_mlp = EmbedFC(context_len, emb_dim)
         self.camera_embed = nn.Embedding(num_cameras, emb_dim)
         nn.init.normal_(self.camera_embed.weight, std=0.02)
-        # A final nonlinearity+linear lets the network mix the three sources.
         self.fuse = nn.Sequential(nn.SiLU(), nn.Linear(emb_dim, emb_dim))
 
     def forward(self, t: torch.Tensor, c: torch.Tensor, cam=None) -> torch.Tensor:

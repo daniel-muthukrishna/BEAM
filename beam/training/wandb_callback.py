@@ -93,9 +93,7 @@ class WeightsAndBiasesCallback(Callback):
         return
 
     def on_epoch_end(self, trainer: Any, epoch: int, logs: Dict) -> None:
-        """Full reimplementation of V1's on_epoch_end (not super()) so the
-        broken log_model call can be replaced; metrics/sample logging follow
-        V1's behavior plus the t-bin diagnostics."""
+        """Mostly training diagnostics + checkpoint settings"""
         if not self.use_wandb:
             return
 
