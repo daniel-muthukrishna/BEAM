@@ -1,8 +1,7 @@
 # BEAM background cleaning (scripts/clean.py)
 
 model:
-  dir: /PATH/TO/STAR_PRIOR_MODEL/
-  checkpoint: /PATH/TO/CHECKPOINT/   # EMA weights
+  dir: /PATH/TO/STAR_PRIOR_MODEL/  # holds config.yaml, checkpoint_epoch_final.pth, image_stats.pkl
   context_len: 28        # conditioning vector length (12 null + 16 patch location)
   camera: 2              # camera index, 0-based (camera 3)
   bf16: true             # sample with mixed precision

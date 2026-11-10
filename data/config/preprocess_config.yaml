@@ -1,4 +1,4 @@
-#Path to the root directory containing orbit subfolders with FITS files
+#Root folder of the TICA FFIs, laid out as <fits_folder>/s0022/cam3-ccd1/*.fits (one folder per sector, one per CCD)
 fits_folder: /path/to/tica_ffis/
 
 #Folder containing the raw O<orbit>_altaz.out angle files (used by process_angles.py)
@@ -20,16 +20,20 @@ angles_dic: angles_O11-116_cam_ALL_data_dic_full.pkl
 display_images_folder: ''
 #Target image size
 
-image_size: 4096
+image_size: 256
 
-camera_number: 'all'
+#Camera to process (1-4). process_angles.py also accepts 'all' (--camera_number all) to store every camera
+camera_number: '3'
 
 #Number of workers to use
 num_workers: 10
 
-#First and last orbit number to process (inclusive)
+#preprocess_all.py: first and last sector to process (inclusive), and sectors to skip
+sector_start: 2
+sector_end: 54
+skip_sectors: []
+
+#process_angles.py: first and last orbit to process (inclusive), and orbits to skip
 orbit_start: 11
 orbit_end: 116
-
-#List of orbit numbers to skip entirely (leave empty list to process all)
 skip_orbits: []
