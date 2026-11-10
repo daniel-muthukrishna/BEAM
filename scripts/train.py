@@ -50,9 +50,7 @@ def prepare_dataset(config):
         #conditioning encoding
         add_exposure_flag=config.get('data_add_exposure_flag', True),
         normalize_context=config.get('data_normalize_context', True),
-        # sky-normalized / unconditional variants (star prior). flatten_config
-        # explodes the yaml's data.sky_by_sector mapping into one key per
-        # sector ("data_sky_by_sector_<N>"), so reassemble it here.
+        # sky-normalization for star prior model
         sky_by_sector=({int(k.rsplit('_', 1)[1]): float(v)
                         for k, v in config.items()
                         if k.startswith('data_sky_by_sector_')} or None),
@@ -141,8 +139,7 @@ def create_callbacks(config, args, rank):
 
 def train_worker(rank, world_size, config, train_dataset, valid_dataset, args, resume_path=None, device=None):
     """
-    Worker function for training on a single GPU. (Unchanged apart from the
-    V2 trainer import.)
+    Worker function for training on a single GPU.
     """
     if device is None:
         device = torch.device(f'cuda:{rank}')
