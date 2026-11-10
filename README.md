@@ -31,34 +31,44 @@ pip install -e .
 
 ## Pretrained model
 
-The [releases page](https://github.com/daniel-muthukrishna/BEAM/releases) has a trained model for TESS camera 3 and the angle file it needs:
+The [releases page](https://github.com/daniel-muthukrishna/BEAM/releases) has a trained model for TESS camera 3 and the angle file it needs. Unpack it anywhere:
 
-- **Model folder**, containing:
-  - `config.yaml`: the architecture and data settings the model was trained with
+- **Scattered-light model folder**, containing:
+  - `config.yaml`: the architecture and image settings the model was trained with
+  - `checkpoint_epoch_final.pth`: the trained weights, including the EMA weights used by default
   - `context_stats.pkl`: the mean and standard deviation used to standardize the geometry features
   - `image_stats.pkl`: the mean and standard deviation used to normalize the images
-  - `checkpoint_epoch_final_*.pth`: the trained weights, including the EMA weights used by default
-- **`angles_O11-116_allcams_data_FIXED.pkl`**: Earth and Moon geometry for every FFI in orbits 11–116 (sectors 2–54), all cameras.
-- **Star-prior model folder** (same layout as above): the camera-3 star prior used to clean FFIs (see [Cleaning FFIs](#cleaning-ffis)).
+- **Angle file** (`.pkl`): Earth and Moon geometry for every FFI in orbits 11–116 (sectors 2–54), all cameras.
+- **Star-prior model folder**: the camera-3 star prior used to clean FFIs (see [Cleaning FFIs](#cleaning-ffis)). It holds `config.yaml`, `checkpoint_epoch_final.pth` and `image_stats.pkl`.
 
-The model generates 256×256 images of camera 3. It was trained on orbits 11–45 and validated on orbits 46–54.
+The scripts find the files in a model folder by these exact names, so keep them as they are. The folders themselves can be named anything.
+
+The scattered-light model generates 256×256 images of camera 3. It was trained on orbits 11–45 and validated on orbits 46–54.
 
 ## Generating scattered-light images
 
-```bash
-python scripts/generate.py --config configs/generation_config.yaml \
-    --model_dir /path/to/model_folder \
-    --angle_path /path/to/angles_O11-116_allcams_data_FIXED.pkl \
-    --sector 10
-```
+1. Set every key in `configs/generation_config.yaml`. All of them are required:
+   - `model_dir`: the scattered-light model folder from the [releases page](https://github.com/daniel-muthukrishna/BEAM/releases)
+   - `angle_path`: the angle file
+   - `output_dir`: where the generated files go
+   - `ema`, `guidance_scale`, `num_sde_steps`, `batch_size`, `seed`: sampler settings
+   - `devices`: one worker per device, e.g. `[cuda:0]`, `[cuda:0, cuda:1]` or `[cpu]`
 
-- `--sector N` generates every FFI of sector N in the angle file (sector N = orbits 2N+7 and 2N+8). Use `--ffi-nums 00123456 00123457 ...` for specific FFIs instead.
-- `--limit N` generates only the first N selected FFIs, for a quick test.
-- `--device cpu` (or `cuda:1`, ...) picks the device; `--devices cuda:0 cuda:1` runs one worker per GPU.
-- `--output_dir` sets where the files go (default: `<model_dir>/generated`).
-- `--guidance_scale`, `--seed`, `--batch_size`, `--checkpoint` and `--no-ema` can be set on the command line or in `configs/generation_config.yaml`.
+   Paths may start with `~/`.
 
-Each FFI is written to `generated_light_s<sector>-<ffi>-cam<camera>.fits` in electrons per second, with the FFI number, orbit, sector and sampler settings in the FITS header. `generation_preview.png` shows up to 16 of the generated images.
+2. Choose the FFIs on the command line and run:
+
+   ```bash
+   python scripts/generate.py --config configs/generation_config.yaml --sector 10
+   ```
+
+   - `--sector N` generates every FFI of sector N in the angle file (sector N = orbits 2N+7 and 2N+8). Use `--ffi-nums 00123456 00123457 ...` for specific FFIs instead.
+   - `--limit N` generates only the first N selected FFIs, for a quick test.
+   - `--num-shards K --shard-index i` runs only part `i` (0-based) of the selected FFIs, so one job can be split across machines or cluster jobs. Within a job, `devices` splits the work across GPUs.
+
+Settings live in exactly one place: paths, sampler and device settings in the config, and the choice of FFIs on the command line. The model's architecture comes from `config.yaml` in the model folder.
+
+Each FFI is written to `generated_light_s<sector>-<ffi>-cam<camera>.fits` in electrons per second, with the FFI number, orbit, sector, sampler settings and model folder name in the FITS header. `generation_preview.png` shows up to 16 of the generated images.
 
 Only FFIs listed in the angle file can be generated, since the model's input is that file's geometry for each FFI.
 
@@ -67,10 +77,12 @@ Only FFIs listed in the angle file can be generated, since the model's input is 
 `scripts/clean.py` estimates and removes the background of camera-3 TICA FFIs with a camera-3 star-prior model, starting from each frame's processed 256×256 image (from `data/preprocess_all.py`).
 
 1. Set the paths in `configs/clean_config.yaml`:
-   - `model.dir`: the star-prior model folder from the [releases page](https://github.com/daniel-muthukrishna/BEAM/releases)
+   - `model.dir`: the star-prior model folder from the [releases page](https://github.com/daniel-muthukrishna/BEAM/releases), holding `config.yaml`, `checkpoint_epoch_final.pth` and `image_stats.pkl`
    - `data.tica_dir`: the TICA FFIs, found by file name anywhere under this folder
    - `data.start_dir`: the processed 256×256 images, named `<CCD1 file name without .fits>_processed_im256x256`
    - `output_dir`: where the results go
+
+   Paths may start with `~/`.
 2. List the frames, one `sector ffi` per line (see `configs/clean_frames_example.txt`):
 
    ```
@@ -100,7 +112,7 @@ Azimuths are encoded as sine and cosine, giving 16 features, which are standardi
 
 `ContextUnet` (`beam/models/unet.py`) is a U-Net whose residual blocks are modulated by a single embedding of the diffusion time, the camera and the geometry features, with self-attention at the lower resolutions.
 
-`ScoreMatch` (`beam/models/interpolant.py`) trains it with flow matching on a straight path from noise to image (`architecture: flow`). Images are generated by integrating the learned velocity field with an adaptive ODE solver (dopri5), optionally with classifier-free guidance (`--guidance_scale`). The `noise`, `score` and `v` architectures use a variance-preserving path and an SDE sampler instead.
+`ScoreMatch` (`beam/models/interpolant.py`) trains it with flow matching on a straight path from noise to image (`architecture: flow`). Images are generated by integrating the learned velocity field with an adaptive ODE solver (dopri5), optionally with classifier-free guidance (`guidance_scale` in `configs/generation_config.yaml`). The `noise`, `score` and `v` architectures use a variance-preserving path and an SDE sampler instead.
 
 ## Training
 
@@ -128,7 +140,7 @@ Training needs an angle file and processed images, made with the scripts in `dat
    - `distributed.world_size` sets the number of GPUs.
    - `data.valid_orbits` sets which orbits are held out for validation; every other orbit trains.
    - `--resume path/to/checkpoint.pth` resumes a run.
-   - Checkpoints, `config.yaml`, `context_stats.pkl` and `image_stats.pkl` are saved to `paths.save_dir`. That folder is what `generate.py --model_dir` expects.
+   - Checkpoints, `config.yaml`, `context_stats.pkl` and `image_stats.pkl` are saved to `paths.save_dir`. To use that folder as a model folder, rename the final checkpoint from `checkpoint_epoch_final_<date>_<time>.pth` to `checkpoint_epoch_final.pth`, then point `model_dir` in `configs/generation_config.yaml` (or `model.dir` in `configs/clean_config.yaml`) at it.
 
 ## Repository layout
 
@@ -142,4 +154,3 @@ configs/       training (sm_config.yaml), generation (generation_config.yaml) an
 data/          preprocessing: TICA FFIs -> training images, altaz tables -> angle file
 scripts/       train.py, generate.py, clean.py
 ```
-
