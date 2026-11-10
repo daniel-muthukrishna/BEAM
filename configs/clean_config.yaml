@@ -1,0 +1,32 @@
+# BEAM background cleaning (scripts/clean.py)
+
+model:
+  dir: /home/djtufto/models/model_outputs/cam3_tica_star_skynorm_256x256_uniform_sigma
+  checkpoint: checkpoint_epoch_final_20260804_155945.pth   # EMA weights
+  context_len: 28        # conditioning vector length (12 null + 16 patch location)
+  camera: 2              # camera index, 0-based (camera 3)
+  bf16: true             # sample with mixed precision
+  patch_batch: 128       # patches per forward pass 
+
+data:
+  tica_dir: /PATH/TO/TICA/ # TICA FFIs (hlsp_tica_tess_ffi_s<sector>-o<orbit>-<ffi>-cam3-ccd<ccd>_*.fits), searched recursively
+  start_dir: /PATH/TO/INPUT/ # h, path of classical estimators (preprocessed ests)
+  file_unit: 633118      # e- per file unit
+  exptime: 1425.6        # s; frames with a different EXPTIME are rejected
+
+output_dir: /PATH/TO/OUTPUT
+batch_size: 8            # frames per GPU batch
+seed: 0                  # tiling offsets
+
+ladder:
+  sigma_top: 0.8
+  sigma_bottom: 0.01
+  levels: 11             # log-spaced
+  steps_per_level: 20
+  step: 0.1              # relative step size
+
+clip: 2000               # residual clip, e-/s
+highpass: 33             # high-pass filter width, coarse cells
+hold:
+  c: 2.0                 # tau = c * sigma / (t * K)
+  release: 10.0          # e-/s
