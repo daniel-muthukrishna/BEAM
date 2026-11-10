@@ -243,9 +243,9 @@ def run_worker(worker_idx, run):
     model = load_model(
         run["checkpoint_path"], config, context_len, device, use_ema=args.use_ema
     )
-    # same 0-based camera index the V2 dataset feeds the model during training
     cam_idx = int(run["camera"]) - 1
 
+    #record seed + make sure shards dont have same idx
     if args.seed is not None:
         torch.manual_seed(int(args.seed) + 1000 * args.shard_index + worker_idx)
 
@@ -259,7 +259,6 @@ def run_worker(worker_idx, run):
         c = torch.from_numpy(np.stack([ctx for (_, _, ctx) in chunk])).to(device)
         x0 = torch.randn(len(chunk), 1, *run["image_shape"], device=device)
         cam = torch.full((len(chunk),), cam_idx, dtype=torch.long, device=device)
-        # rebuilt per chunk: cam must match the batch size (last chunk can be short)
         simulator = build_simulator(
             model, args.guidance_scale, args.num_steps, run["epsilon"], device, cam=cam
         )
