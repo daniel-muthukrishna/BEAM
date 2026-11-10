@@ -1,0 +1,21 @@
+# Used by scripts/generate.py — pure ODE/SDE generation from a trained model,
+# conditioned on angles. Select FFIs on the command line: --sector N or --ffi-nums.
+#
+# Model architecture, angle path, camera number, image shape, and the
+# normalization statistics are NOT set here — they are read from the model's
+# own output directory (<model_dir>/config.yaml, context_stats.pkl,
+# image_stats.pkl) so generation always matches training exactly.
+# Any value below can be overridden on the command line.
+
+generation:
+  model_dir: null       # Trained model folder; set here or pass --model_dir
+  checkpoint: null      # Checkpoint filename or path; null = final checkpoint (newest as fallback)
+  output_dir: null      # null = <model_dir>/generated
+  angle_path: null      # Override angles pickle; null = the model's training angle file
+  ema: true             # Sample with EMA weights
+  guidance_scale: 1.0   # Classifier-free guidance scale
+  num_sde_steps: 500    # Euler-Maruyama steps (SDE architectures only; 'flow' ODE is adaptive)
+  batch_size: 32        # FFIs generated per forward pass (per worker)
+  device: cuda:0        # Single device (used when 'devices' is null)
+  devices: null         # e.g. [cuda:0, cuda:1] -> one worker per GPU, FFIs split between them
+  seed: null            # Seed for the initial noise; null = nondeterministic

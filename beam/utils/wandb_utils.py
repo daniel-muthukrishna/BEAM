@@ -5,6 +5,7 @@ This module provides utility functions for logging metrics, images,
 and other artifacts to Weights & Biases during training.
 """
 
+import inspect
 import os
 import numpy as np
 import matplotlib.pyplot as plt
@@ -17,8 +18,8 @@ import io
 # Import Weights & Biases
 import wandb
 
-from beam.models.diffusion import DDPM
 
+from beam.models.interpolant import ScoreMatch, EMA
 
 def init_wandb(config: Dict[str, Any], project_name: str = "beam-tess", mode: str = "online") -> None:
     """
@@ -125,14 +126,17 @@ def log_images(
 
 
 def log_sample_images(
-    model: DDPM,
+    model: ScoreMatch,
     dataloader: DataLoader,
     device: torch.device,
     n_sample: int = 3,
     n_datapoint: int = 1,
     image_shape: Tuple[int, int] = (64, 64),
     step: int = None,
-    name: str = "Training Set"  # "Training" or "Validation"
+    name: str = "Training Set",  # "Training" or "Validation"
+    ema: Optional[EMA] = None,
+    MEAN: Optional[float] = None,
+    STD: Optional[float] = None,
 ) -> None:
     """
     Generate samples and log them to W&B with original and generated images side by side.
@@ -146,26 +150,52 @@ def log_sample_images(
         image_shape: Shape of the images
         step: Optional step number (e.g., epoch)
         name: Name for the log (e.g., "Training Set", "Validation Set")
+        ema: Optional EMA model
+        MEAN: Mean of the data (data normalization statistic, required)
+        STD: Standard deviation of the data (data normalization statistic, required)
     """
+    if MEAN is None or STD is None:
+        raise ValueError("log_sample_images requires MEAN and STD (data normalization stats)")
+    if ema is not None:
+        ema.store(model)
+        ema.copy_to(model)
+
+
     # Get a batch of data
     data_batch = next(iter(dataloader))
-    
     # Extract data (limited to n_datapoint)
     x_real = data_batch['y'][:n_datapoint].to(device)
     c_real = data_batch['x'][:n_datapoint].to(device)
-    ffi_nums = data_batch['ffi_num'][:n_datapoint]
-    orbits = data_batch['orbit'][:n_datapoint]
-    
+    # Optional metadata: TESS datasets carry ffi_num/orbit;
+    # carry a class label or nothing. Build a per-sample caption that adapts.
+    ffi_nums = data_batch['ffi_num'][:n_datapoint] if 'ffi_num' in data_batch else None
+    orbits = data_batch['orbit'][:n_datapoint] if 'orbit' in data_batch else None
+    labels = data_batch['label'][:n_datapoint] if 'label' in data_batch else None
+
+    def _meta(i: int) -> str:
+        if ffi_nums is not None and orbits is not None:
+            return f"Orbit {orbits[i]}, FFI {ffi_nums[i]}"
+        if labels is not None:
+            return f"Class {int(labels[i])}"
+        return f"Sample {i}"
+
+    extra_kwargs = {}
+    if 'cam' in data_batch and 'cam' in inspect.signature(model.simulate).parameters:
+        extra_kwargs['cam'] = data_batch['cam'][:n_datapoint].to(device)
     # Generate samples
     with torch.no_grad():
-        x_gen, x_gen_store, timesteps_store = model.sample_c(
-            c_real, 
-            n_sample, 
-            (1, image_shape[0], image_shape[1]), 
-            device
+        x_gen, x_gen_store, timesteps_store = model.simulate(
+            c_real,
+            n_sample,
+            (image_shape[0], image_shape[1]),
+            device,
+            num_save=8,
+            num_steps=300,
+            guidance_scale=1.2,
+            **extra_kwargs
         )
-    
-    # Create side-by-side comparison for each datapoint
+    if len(x_gen.shape) == 3:
+        x_gen = x_gen.unsqueeze(0)
     comparison_images = []
     comparison_captions = []
     
@@ -175,17 +205,15 @@ def log_sample_images(
         
         # Add original image
         plt.subplot(1, n_sample+1, 1)
-        plt.imshow(x_real[i][0].cpu().detach().numpy(), cmap='viridis', vmin=0, vmax=1)
-        plt.title(f"Original\nOrbit {orbits[i]}, FFI {ffi_nums[i]}")
+        plt.imshow(x_real[i][0].cpu().detach().numpy()*STD + MEAN, cmap='viridis', vmin=0, vmax=1)
+        plt.title(f"Original\n{_meta(i)}")
         plt.axis('off')
-        
         # Add generated samples
         for j in range(n_sample):
             plt.subplot(1, n_sample+1, j+2)
-            plt.imshow(x_gen[i*n_sample + j][0].cpu().detach().numpy(), cmap='viridis', vmin=0, vmax=1)
+            plt.imshow(x_gen[i*n_sample + j][0].cpu().detach().numpy()*STD + MEAN, cmap='viridis', vmin=0, vmax=1)
             plt.title(f"Sample {j+1}")
             plt.axis('off')
-            
         plt.tight_layout()
         
         # Convert figure to image array
@@ -194,11 +222,9 @@ def log_sample_images(
         plt.close(fig)
         
         comparison_images.append(img_array)
-        comparison_captions.append(f"Orbit {orbits[i]}, FFI {ffi_nums[i]}")
-    
+        comparison_captions.append(_meta(i))
     # Log the comparison images
     log_images(f"{name} Original vs Generated Samples", comparison_images, step=step, caption=comparison_captions)
-    
     # Log generation process for one sample
     if len(timesteps_store) > 8:
         indices = -np.logspace(0.2, np.log10(len(timesteps_store)), 8, dtype=int) # log scale so that earlier diffusion steps are more frequent
@@ -207,12 +233,12 @@ def log_sample_images(
     else:
         display_timesteps = timesteps_store
         display_samples = x_gen_store   
-    
+
     # Create figure for generation process
     fig = plt.figure(figsize=(16, 3))
     for idx, (ts, sample) in enumerate(zip(display_timesteps, display_samples)):
         plt.subplot(1, len(display_timesteps), idx+1)
-        plt.imshow(sample[0, 0], cmap='gray', vmin=0, vmax=1)
+        plt.imshow(sample[0, 0]*STD + MEAN, cmap='viridis', vmin=0, vmax=1)
         
         if idx == 0:
             plt.title(f"t={ts}\n(Pure Noise)")
@@ -223,7 +249,7 @@ def log_sample_images(
             
         plt.axis('off')
     plt.tight_layout()
-    
+
     # Convert figure to image array
     fig.canvas.draw()
     process_img = np.array(fig.canvas.renderer.buffer_rgba())
@@ -231,6 +257,8 @@ def log_sample_images(
     
     # Log the generation process
     log_images(f"{name} Generation Process", [process_img], step=step, caption=["Denoising steps"])
+    if ema is not None:
+        ema.restore(model)
 
 
 def log_figure(tag: str, fig: plt.Figure, step: int = None) -> None:
@@ -246,7 +274,7 @@ def log_figure(tag: str, fig: plt.Figure, step: int = None) -> None:
     log_images(tag, image, step=step)
 
 
-def log_model(model: torch.nn.Module, name: str = "model") -> None:
+def log_model(model: torch.nn.Module, name: str = "model", ema: Optional[EMA] = None) -> None:
     """
     Log a PyTorch model to W&B.
     
@@ -256,6 +284,8 @@ def log_model(model: torch.nn.Module, name: str = "model") -> None:
     """
     # Get model state dict, handling DistributedDataParallel
     model_state = model.module.state_dict() if hasattr(model, 'module') else model.state_dict()
+    if ema is not None:
+        model_state |= ema.state_dict()
     
     # Save model to a temporary file
     tmp_path = f"{name}.pt"
@@ -267,6 +297,7 @@ def log_model(model: torch.nn.Module, name: str = "model") -> None:
     # Clean up
     if os.path.exists(tmp_path):
         os.remove(tmp_path)
+
 
 
 def finish_run() -> None:

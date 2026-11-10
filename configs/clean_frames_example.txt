@@ -1,0 +1,6 @@
+# Frames for scripts/clean.py
+# Example
+# 17 00026427
+# 17 00026975
+# 22 00032936
+# 22 00033285

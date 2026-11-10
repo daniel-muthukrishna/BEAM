@@ -6,11 +6,10 @@ control the training process.
 """
 
 from typing import Dict, List, Optional, Callable, Any
-import time
 import os
 import torch
 import numpy as np
-
+from datetime import datetime
 
 class Callback:
     """Base class for callbacks."""
@@ -67,6 +66,7 @@ class EarlyStopping(Callback):
         self.best = float('inf') if mode == 'min' else float('-inf')
         self.stopped_epoch = 0
         self.best_weights = None
+        self.best_ema = None
         
     def on_train_begin(self, trainer: Any) -> None:
         """Reset wait counter and best value at the start of training."""
@@ -93,6 +93,12 @@ class EarlyStopping(Callback):
                 if hasattr(model, 'module'):
                     model = model.module
                 self.best_weights = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                self.best_ema = {
+                    k: [t.cpu().clone() for t in v] if isinstance(v, list) and all(hasattr(t, 'cpu') for t in v)
+                    else v.cpu().clone() if hasattr(v, 'cpu')
+                    else v
+                    for k, v in trainer.ema.state_dict().items()
+                    }
         else:
             self.wait += 1
             if self.wait >= self.patience:
@@ -104,6 +110,7 @@ class EarlyStopping(Callback):
                     if hasattr(model, 'module'):
                         model = model.module
                     model.load_state_dict(self.best_weights)
+                    trainer.ema.load_state_dict(self.best_ema)
 
 
 class ModelCheckpoint(Callback):
@@ -145,7 +152,7 @@ class ModelCheckpoint(Callback):
             self.epochs_since_last_save = 0
             
             # Format filepath with epoch and metrics
-            filepath = self.filepath.format(epoch=epoch, **logs)
+            filepath = self.filepath.format(epoch=epoch, datetime=datetime.now().strftime('%Y%m%d_%H%M%S'), **logs)
             
             if self.save_best_only:
                 current = logs.get(self.monitor)
@@ -160,8 +167,18 @@ class ModelCheckpoint(Callback):
                 if improvement:
                     self.best = current
                     self._save_model(trainer, filepath)
+                    print(f'MODEL CHECKPOINT: ON EPOCH END: Best Model (Weights only = {self.save_weights_only}) saved to {filepath}')
+                else:
+                    print(f'MODEL CHECKPOINT: ON EPOCH END: No improvement in {self.monitor} from {self.best} to {current}')
             else:
                 self._save_model(trainer, filepath)
+                print(f'MODEL CHECKPOINT: ON EPOCH END: Model (Weights only = {self.save_weights_only}) saved to {filepath}')
+    
+    def on_train_end(self, trainer: Any) -> None:
+        """Save the model at the end of training."""
+        filepath = self.filepath.format(epoch="final", datetime=datetime.now().strftime('%Y%m%d_%H%M%S'))
+        self._save_model(trainer, filepath)
+        print(f'MODEL CHECKPOINT: ON TRAIN END: Model (Weights only = {self.save_weights_only}) saved to {filepath}')
     
     def _save_model(self, trainer: Any, filepath: str) -> None:
         """Save the model."""
@@ -172,7 +189,8 @@ class ModelCheckpoint(Callback):
             model = trainer.model
             if hasattr(model, 'module'):
                 model = model.module
-            torch.save(model.state_dict(), filepath)
+            ema = trainer.ema
+            torch.save({'model_state_dict': model.state_dict(), 'ema_state_dict': ema.state_dict(), 'scaler_state_dict': trainer.scaler.state_dict() if trainer.config['training_mixed_precision'] else None}, filepath)
         else:
             # Save full checkpoint
             checkpoint = {
@@ -183,6 +201,12 @@ class ModelCheckpoint(Callback):
                 'optimizer_state_dict': trainer.optimizer.state_dict(),
                 'train_loss': trainer.loss_history_train,
                 'valid_loss': trainer.loss_history_valid,
+                'time_history': trainer.time_history,
+                'best_valid_loss': trainer.best_valid_loss,
+                'epochs_without_improvement': trainer.epochs_without_improvement,
+                'ema_state_dict': trainer.ema.state_dict(),
+                'scaler_state_dict': trainer.scaler.state_dict() if trainer.config['training_mixed_precision'] else None
+                
             }
             torch.save(checkpoint, filepath)
 

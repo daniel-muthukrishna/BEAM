@@ -5,7 +5,7 @@ This module provides training loops, distributed training utilities,
 and monitoring components.
 """
 
-from beam.training.trainer import DiffusionTrainer
+from beam.training.trainer import SMTrainer
 from beam.training.distributed import (
     setup_distributed,
     cleanup_distributed,
@@ -15,7 +15,7 @@ from beam.training.distributed import (
 )
 
 __all__ = [
-    'DiffusionTrainer',
+    'SMTrainer',
     'setup_distributed',
     'cleanup_distributed',
     'run_distributed',
