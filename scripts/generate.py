@@ -4,15 +4,6 @@
 Usage:
     python scripts/generate.py --config configs/generation_config.yaml --sector 10
 
-Every setting has exactly one source:
-  - the generation config (--config): model folder, angle file, output folder,
-    sampler and device settings. Every key in GENERATION_KEYS is required.
-  - the command line: which FFIs to generate (--sector or --ffi-nums, --limit)
-    and sharding (--num-shards, --shard-index).
-  - the model folder: architecture and image settings from its config.yaml
-    (REQUIRED_CONFIG_KEYS and OPTIONAL_CONFIG_KEYS only), the weights and the
-    training statistics.
-
 A model folder always holds the files named in MODEL_FILES, under exactly those
 names. The folder itself can be named anything and unpacked anywhere.
 """
