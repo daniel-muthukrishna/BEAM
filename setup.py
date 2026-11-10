@@ -4,8 +4,8 @@ setup(
     name="beam",
     version="1.0.0",
     description="Background Elimination via Additive Modeling",
-    author="Daniel Muthukrishna, Drew Tufto"
-    author_email="daniel.muthukrishna@gmail.com, ajtufto@gmail.com"
+    author="Daniel Muthukrishna, Drew Tufto",
+    author_email="daniel.muthukrishna@gmail.com, ajtufto@gmail.com",
     url="https://github.com/daniel-muthukrishna/beam",
     packages=find_packages(include=["beam", "beam.*"]),
     classifiers=[
