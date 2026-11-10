@@ -1,8 +1,26 @@
 #!/usr/bin/env python
+"""Generate scattered-light images from a trained BEAM model.
+
+Usage:
+    python scripts/generate.py --config configs/generation_config.yaml --sector 10
+
+Every setting has exactly one source:
+  - the generation config (--config): model folder, angle file, output folder,
+    sampler and device settings. Every key in GENERATION_KEYS is required.
+  - the command line: which FFIs to generate (--sector or --ffi-nums, --limit)
+    and sharding (--num-shards, --shard-index).
+  - the model folder: architecture and image settings from its config.yaml
+    (REQUIRED_CONFIG_KEYS and OPTIONAL_CONFIG_KEYS only), the weights and the
+    training statistics.
+
+A model folder always holds the files named in MODEL_FILES, under exactly those
+names. The folder itself can be named anything and unpacked anywhere.
+"""
 import os
-import glob
 import pickle
 import argparse
+
+import yaml
 
 from astropy.io import fits
 import numpy as np
@@ -27,6 +45,49 @@ from beam.data.datasets import TESSDataset_angles_only
 # (1425.6 s effective), so this one factor converts them to e-/s for every cadence.
 E_PER_S_PER_UNIT = 633118 / 1425.6
 
+# The only keys read from the model config. All are required; none has a default,
+# so a missing key fails loudly instead of silently building the wrong model.
+REQUIRED_CONFIG_KEYS = [
+    "model_architecture",
+    "model_n_feat",
+    "model_channel_mults",
+    "model_heads_at",
+    "model_num_res",
+    "model_time_dim",
+    "model_context_dim",
+    "model_emb_dim",
+    "model_drop_prob",
+    "model_epsilon",
+    "data_image_shape",
+    "data_camera_number",
+]
+
+# Optional architecture keys and their defaults. Cross-attention is off in this
+# version of the model, so a config may leave it out.
+OPTIONAL_CONFIG_KEYS = {
+    "model_use_cross_attn": False,
+}
+
+# Fixed file names inside every model folder. scripts/clean.py uses these too.
+MODEL_FILES = {
+    "config": "config.yaml",
+    "checkpoint": "checkpoint_epoch_final.pth",
+    "context_stats": "context_stats.pkl",
+    "image_stats": "image_stats.pkl",
+}
+
+
+def model_files(model_dir, needed=tuple(MODEL_FILES)):
+    """Paths of the fixed-name files in model_dir. Raises if the folder or any needed file is missing."""
+    if not os.path.isdir(model_dir):
+        raise FileNotFoundError(f"model folder not found: {model_dir}")
+    paths = {k: os.path.join(model_dir, MODEL_FILES[k]) for k in needed}
+    missing = [MODEL_FILES[k] for k, p in paths.items() if not os.path.isfile(p)]
+    if missing:
+        raise FileNotFoundError(f"{model_dir} is missing {missing}; a model folder must contain "
+                                f"{[MODEL_FILES[k] for k in needed]}")
+    return paths
+
 
 def sector_to_orbits(sector: int) -> set:
     """sector 1 = orbits 9,10"""
@@ -37,135 +98,110 @@ def orbit_to_sector(orbit: int) -> int:
     return (int(orbit) - 7) // 2
 
 
+# Every key of the generation config. All are required and no others are allowed,
+# so a typo or a missing setting fails loudly instead of falling back to a default.
+GENERATION_KEYS = {
+    "model_dir": "folder holding " + ", ".join(MODEL_FILES.values()),
+    "angle_path": "Earth/Moon angle file (.pkl)",
+    "output_dir": "folder for the generated FITS files",
+    "ema": "true = sample with EMA weights",
+    "guidance_scale": "classifier-free guidance scale",
+    "num_sde_steps": "Euler-Maruyama steps (SDE architectures only; 'flow' uses adaptive dopri5)",
+    "batch_size": "FFIs per forward pass, per device",
+    "devices": "list of devices, one worker each, e.g. [cuda:0, cuda:1] or [cpu]",
+    "seed": "seed for the initial noise; null = nondeterministic",
+}
+
+
+def load_generation_config(path):
+    """Read and check the generation config. Returns its settings as a dict."""
+    with open(path) as f:
+        cfg = yaml.safe_load(f) or {}
+    if set(cfg) != {"generation"}:
+        raise ValueError(f"{path} must have exactly one top-level section, 'generation:'")
+    gen = cfg["generation"] or {}
+    missing = [k for k in GENERATION_KEYS if k not in gen]
+    unknown = [k for k in gen if k not in GENERATION_KEYS]
+    if missing or unknown:
+        raise KeyError(f"{path}: missing keys {missing}, unknown keys {unknown}. "
+                       f"Expected exactly: {list(GENERATION_KEYS)}")
+
+    def check(ok, key, what):
+        if not ok:
+            raise TypeError(f"{path}: generation.{key} must be {what}, got {gen[key]!r}")
+
+    for key in ("model_dir", "angle_path", "output_dir"):
+        check(isinstance(gen[key], str) and gen[key], key, "a path")
+        gen[key] = os.path.expanduser(gen[key])
+    check(isinstance(gen["ema"], bool), "ema", "true or false")
+    check(isinstance(gen["guidance_scale"], (int, float)) and not isinstance(gen["guidance_scale"], bool),
+          "guidance_scale", "a number")
+    for key in ("num_sde_steps", "batch_size"):
+        check(isinstance(gen[key], int) and not isinstance(gen[key], bool) and gen[key] > 0,
+              key, "a positive integer")
+    check(isinstance(gen["devices"], list) and gen["devices"] and all(isinstance(d, str) for d in gen["devices"]),
+          "devices", "a non-empty list such as [cuda:0]")
+    check(gen["seed"] is None or (isinstance(gen["seed"], int) and not isinstance(gen["seed"], bool)),
+          "seed", "an integer or null")
+    return gen
+
+
 def parse_args():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Generate scattered-light images from a trained BEAM model. "
+                    "Paths, sampler and device settings live in the generation config; "
+                    "the command line picks which FFIs to generate."
+    )
+    parser.add_argument("--config", required=True, help="generation config, e.g. configs/generation_config.yaml")
 
-    parser.add_argument(
-        "--config",
-        type=str,
-    )
-    parser.add_argument(
-        "--model_dir",
-        type=str,
-        default=None,
-    )
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        default=None,
-    )
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument(
-        "--sector",
-        type=int,
-        default=None,
-    )
-    group.add_argument(
-        "--ffi-nums",
-        type=str,
-        nargs="+",
-        default=None,
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default=None,
-    )
-    parser.add_argument(
-        "--angle_path",
-        type=str,
-        default=None,
-    )
-    parser.add_argument("--num_steps", type=int, default=None)
-    parser.add_argument("--guidance_scale", type=float, default=None)
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=None,
-    )
-    parser.add_argument("--no-ema", action="store_true")
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Only generate the first N selected FFIs",
-    )
-    parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--device", type=str, default=None)
-    parser.add_argument("--devices", type=str, nargs="+", default=None)
-    parser.add_argument("--num-shards", type=int, default=1)
-    parser.add_argument("--shard-index", type=int, default=0)
-    return parser.parse_args()
-
-
-def resolve_settings(args):
-    gen_config = flatten_config(load_config(args.config))
-
-    def pick(cli_value, key, default=None):
-        return cli_value if cli_value is not None else gen_config.get(key, default)
-
-    # priority --devices > --device > config devices > config device
-    if args.devices:
-        devices = list(args.devices)
-    elif args.device:
-        devices = [args.device]
-    else:
-        cfg_devices = gen_config.get("generation_devices")
-        devices = (
-            list(cfg_devices)
-            if cfg_devices
-            else [gen_config.get("generation_device", "cuda:0")]
-        )
+    select = parser.add_mutually_exclusive_group(required=True)
+    select.add_argument("--sector", type=int, help="Generate every FFI of this sector in the angle file")
+    select.add_argument("--ffi-nums", type=str, nargs="+", help="Generate these FFIs")
+    parser.add_argument("--limit", type=int, default=None, help="Only generate the first N selected FFIs")
+    parser.add_argument("--num-shards", type=int, default=1, help="Split the selected FFIs into this many jobs")
+    parser.add_argument("--shard-index", type=int, default=0, help="Which of those jobs this run is (0-based)")
+    args = parser.parse_args()
 
     if not (0 <= args.shard_index < args.num_shards):
-        raise ValueError(
-            f"--shard-index must be in [0, {args.num_shards}), got {args.shard_index}"
-        )
+        parser.error(f"--shard-index must be in [0, {args.num_shards}), got {args.shard_index}")
+    try:
+        gen = load_generation_config(args.config)
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        parser.error(f"--config: {e}")
+    try:
+        files = model_files(gen["model_dir"])
+    except FileNotFoundError as e:
+        parser.error(f"generation.model_dir: {e}")
+    if not os.path.isfile(gen["angle_path"]):
+        parser.error(f"generation.angle_path: file not found: {gen['angle_path']}")
+    for d in gen["devices"]:
+        if d.startswith("cuda") and not torch.cuda.is_available():
+            parser.error(f"generation.devices has {d} but CUDA is not available; set devices: [cpu]")
 
-    settings = argparse.Namespace(
-        model_dir=pick(args.model_dir, "generation_model_dir"),
-        checkpoint=pick(args.checkpoint, "generation_checkpoint"),
-        output_dir=pick(args.output_dir, "generation_output_dir"),
-        angle_path=pick(args.angle_path, "generation_angle_path"),
-        num_steps=int(pick(args.num_steps, "generation_num_sde_steps", 500)),
-        guidance_scale=float(
-            pick(args.guidance_scale, "generation_guidance_scale", 1.0)
-        ),
-        batch_size=int(pick(args.batch_size, "generation_batch_size", 16)),
-        devices=devices,
-        seed=pick(args.seed, "generation_seed"),
-        use_ema=bool(gen_config.get("generation_ema", True)) and not args.no_ema,
-        sector=args.sector,
-        ffi_nums=args.ffi_nums,
-        limit=args.limit,
-        num_shards=args.num_shards,
-        shard_index=args.shard_index,
-    )
-    if not settings.model_dir:
-        raise ValueError(
-            f"No model_dir: set generation.model_dir in {args.config} "
-            "or pass --model_dir"
-        )
-    return settings
+    # One flat namespace for the rest of the script; each value came from exactly one place.
+    args.files = files
+    args.model_dir = gen["model_dir"]
+    args.angles = gen["angle_path"]
+    args.output_dir = gen["output_dir"]
+    args.use_ema = gen["ema"]
+    args.guidance_scale = float(gen["guidance_scale"])
+    args.num_steps = gen["num_sde_steps"]
+    args.batch_size = gen["batch_size"]
+    args.devices = list(gen["devices"])
+    args.seed = gen["seed"]
+    return args
 
 
-def find_checkpoint(model_dir, checkpoint_arg):
-    if checkpoint_arg:
-        path = (
-            checkpoint_arg
-            if os.path.isabs(checkpoint_arg) or os.path.exists(checkpoint_arg)
-            else os.path.join(model_dir, checkpoint_arg)
-        )
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_arg}")
-        return path
-    finals = sorted(glob.glob(os.path.join(model_dir, "checkpoint_epoch_final_*.pth")))
-    if finals:
-        return finals[-1]
-    checkpoints = glob.glob(os.path.join(model_dir, "checkpoint_*.pth"))
-    if not checkpoints:
-        raise FileNotFoundError(f"No checkpoint_*.pth in {model_dir}")
-    return max(checkpoints, key=os.path.getmtime)
+def load_model_config(path):
+    config = flatten_config(load_config(path))
+    missing = [k for k in REQUIRED_CONFIG_KEYS if k not in config]
+    if missing:
+        raise KeyError(f"{path} is missing required keys: {missing}")
+    # Keep only the architecture keys so nothing else in the file can be used.
+    arch = {k: config[k] for k in REQUIRED_CONFIG_KEYS}
+    for k, default in OPTIONAL_CONFIG_KEYS.items():
+        arch[k] = config.get(k, default)
+    return arch
 
 
 def load_model(checkpoint_path, config, context_len, device, use_ema=True):
@@ -175,11 +211,12 @@ def load_model(checkpoint_path, config, context_len, device, use_ema=True):
         n_feat=config["model_n_feat"],
         channel_mults=config["model_channel_mults"],
         heads_at=config["model_heads_at"],
-        time_dim=config.get("model_time_dim", 128),
-        context_dim=config.get("model_context_dim", 64),
-        emb_dim=config.get("model_emb_dim", 256),
+        time_dim=config["model_time_dim"],
+        context_dim=config["model_context_dim"],
+        emb_dim=config["model_emb_dim"],
         num_res=config["model_num_res"],
-        use_cross_attn=config.get("model_use_cross_attn", True),
+        # .get so scripts/clean.py, which passes its own config, gets the same default
+        use_cross_attn=config.get("model_use_cross_attn", OPTIONAL_CONFIG_KEYS["model_use_cross_attn"]),
     )
     # Two schedules hardcoded
     model = ScoreMatch(
@@ -189,8 +226,8 @@ def load_model(checkpoint_path, config, context_len, device, use_ema=True):
             beta=OTBeta() if config["model_architecture"] == "flow" else VPBeta(),
         ),
         device=device,
-        drop_prob=config.get("model_drop_prob", 0.1),
-        epsilon=config.get("model_epsilon", 1e-4),
+        drop_prob=config["model_drop_prob"],
+        epsilon=config["model_epsilon"],
         architecture=config["model_architecture"],
     )
 
@@ -199,9 +236,7 @@ def load_model(checkpoint_path, config, context_len, device, use_ema=True):
 
     if use_ema:
         if "ema_state_dict" not in checkpoint:
-            raise KeyError(
-                f"No ema_state_dict in {checkpoint_path}; rerun with --no-ema"
-            )
+            raise KeyError(f"No ema_state_dict in {checkpoint_path}; rerun with --no-ema")
         ema = EMA(model=model)
         ema.load_state_dict(checkpoint["ema_state_dict"])
         ema.to(device)
@@ -238,18 +273,16 @@ def run_worker(worker_idx, run):
     args = run["args"]
     config = run["config"]
 
-    device = torch.device(device_str if torch.cuda.is_available() else "cpu")
+    device = torch.device(device_str)
     context_len = entries[0][2].shape[-1]
-    model = load_model(
-        run["checkpoint_path"], config, context_len, device, use_ema=args.use_ema
-    )
+    model = load_model(args.files["checkpoint"], config, context_len, device, use_ema=args.use_ema)
     cam_idx = int(run["camera"]) - 1
 
-    #record seed + make sure shards dont have same idx
+    # record seed + make sure shards dont have same idx
     if args.seed is not None:
         torch.manual_seed(int(args.seed) + 1000 * args.shard_index + worker_idx)
 
-    output_dir = run["output_dir"]
+    output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
     preview = []
@@ -270,9 +303,8 @@ def run_worker(worker_idx, run):
         for i, (ffi, orbit, _) in enumerate(chunk):
             sector = orbit_to_sector(orbit)
             # denormalize, then convert to e-/s
-            raw = (gen[i] * run["img_std"] + run["img_mean"]) * E_PER_S_PER_UNIT
+            raw = (gen[i] * run["img_mean_std"][1] + run["img_mean_std"][0]) * E_PER_S_PER_UNIT
 
-            # potentially helpful metadata
             header = fits.Header()
             header["FFI"] = ffi
             header["ORBIT"] = orbit
@@ -284,10 +316,10 @@ def run_worker(worker_idx, run):
                 args.num_steps if model.architecture != "flow" else -1,
                 "-1 = adaptive dopri5",
             )
-            header["IMGMEAN"] = run["img_mean"]
-            header["IMGSTD"] = run["img_std"]
+            header["IMGMEAN"] = run["img_mean_std"][0]
+            header["IMGSTD"] = run["img_mean_std"][1]
             header["BUNIT"] = "electron/s"
-            header["CKPT"] = os.path.basename(run["checkpoint_path"])
+            header["MODELDIR"] = os.path.basename(os.path.normpath(args.model_dir))
             header["EMA"] = args.use_ema
 
             fits_path = os.path.join(
@@ -321,24 +353,22 @@ def run_worker(worker_idx, run):
 
 
 def main():
-    args = resolve_settings(parse_args())
+    args = parse_args()
 
-    config = flatten_config(load_config(os.path.join(args.model_dir, "config.yaml")))
-    # dataset stats computed from training run
-    with open(os.path.join(args.model_dir, "context_stats.pkl"), "rb") as f:
+    config = load_model_config(args.files["config"])
+    with open(args.files["context_stats"], "rb") as f:
         context_stats = pickle.load(f)
-    with open(os.path.join(args.model_dir, "image_stats.pkl"), "rb") as f:
+    with open(args.files["image_stats"], "rb") as f:
         image_stats = pickle.load(f)
     img_mean, img_std = float(image_stats["mean"]), float(image_stats["std"])
     print(f"Image stats: mean={img_mean:.6g}, std={img_std:.6g}")
 
-    camera = str(config.get("data_camera_number", "3"))
+    camera = str(config["data_camera_number"])
     image_shape = tuple(config["data_image_shape"])
-    epsilon = float(config.get("model_epsilon", 1e-4))
+    epsilon = float(config["model_epsilon"])
 
-    angle_path = args.angle_path or config["data_angle_path"]
     angles_ds = TESSDataset_angles_only(
-        angle_path=angle_path,
+        angle_path=args.angles,
         camera_number=camera,
         context_stats=context_stats,
     )
@@ -352,8 +382,7 @@ def main():
         ]
         if not selected:
             raise ValueError(
-                f"No FFIs for sector {args.sector} (orbits {sorted(orbits)}) "
-                f"in {angle_path}"
+                f"No FFIs for sector {args.sector} (orbits {sorted(orbits)}) in {args.angles}"
             )
         print(f"Sector {args.sector} (orbits {sorted(orbits)}): {len(selected)} FFIs")
     else:
@@ -361,9 +390,9 @@ def main():
         for ffi in args.ffi_nums:
             (selected if ffi in ffi_to_idx else missing).append(ffi)
         if missing:
-            print(f"WARNING: FFIs not in angles dict, skipping: {missing}")
+            print(f"WARNING: FFIs not in angle file, skipping: {missing}")
         if not selected:
-            raise ValueError("None of the requested FFIs are in the angles dict")
+            raise ValueError(f"None of the requested FFIs are in {args.angles}")
         print(f"Generating for {len(selected)} requested FFIs")
 
     selected = sorted(selected)
@@ -386,7 +415,6 @@ def main():
     devices = args.devices[: max(1, min(len(args.devices), len(entries)))]
     worker_entries = [entries[i :: len(devices)] for i in range(len(devices))]
 
-    checkpoint_path = find_checkpoint(args.model_dir, args.checkpoint)
     sampler_name = (
         "ODE (dopri5)"
         if config["model_architecture"] == "flow"
@@ -401,18 +429,14 @@ def main():
         f"({', '.join(str(len(w)) for w in worker_entries)} FFIs per worker)"
     )
 
-    output_dir = args.output_dir or os.path.join(args.model_dir, "generated")
-    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)
 
     run = {
         "args": args,
         "config": config,
         "devices": devices,
         "worker_entries": worker_entries,
-        "checkpoint_path": checkpoint_path,
-        "output_dir": output_dir,
-        "img_mean": img_mean,
-        "img_std": img_std,
+        "img_mean_std": (img_mean, img_std),
         "camera": camera,
         "image_shape": image_shape,
         "epsilon": epsilon,
@@ -423,7 +447,7 @@ def main():
     else:
         mp.spawn(run_worker, args=(run,), nprocs=len(devices), join=True)
 
-    print(f"\n{len(entries)} generations saved to {output_dir}")
+    print(f"\n{len(entries)} generations saved to {args.output_dir}")
 
 
 if __name__ == "__main__":
