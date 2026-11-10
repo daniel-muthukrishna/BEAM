@@ -17,7 +17,6 @@ from torch.utils.data.distributed import DistributedSampler
 from tqdm.auto import tqdm
 import wandb
 
-# UPDATE: V2 model modules
 from beam.models.unet import ContextUnet
 from beam.models.interpolant import ScoreMatch, EMA
 from beam.models.probabilitypath import GaussianProbabilityPath, OTAlpha, OTBeta, VPBeta
@@ -160,7 +159,7 @@ class SMTrainer:
             context_dim=self.config.get('model_context_dim', 64),
             emb_dim=self.config.get('model_emb_dim', 256),
             num_res=self.config['model_num_res'],
-            use_cross_attn=self.config.get('model_use_cross_attn', True),
+            use_cross_attn=self.config.get('model_use_cross_attn', False),
         )
 
         fm = ScoreMatch(
