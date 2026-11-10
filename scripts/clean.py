@@ -25,7 +25,7 @@ from astropy.io import fits
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path[:0] = [REPO, os.path.join(REPO, "scripts")]
 from beam.utils.config import load_config, flatten_config  # noqa: E402
-from generate import load_model  # noqa: E402
+from generate import load_model, model_files  # noqa: E402
 
 FINE, COARSE, PATCH = 4096, 256, 256   
 K = FINE // COARSE # coarse cell num pixels          
@@ -173,17 +173,23 @@ def main():
                 frames.append((int(sector), int(ffi)))
 
     model, data = cfg["model"], cfg["data"]
+    # allow ~/ in every path setting
+    model["dir"] = os.path.expanduser(model["dir"])
+    data["tica_dir"] = os.path.expanduser(data["tica_dir"])
+    data["start_dir"] = os.path.expanduser(data["start_dir"])
+    cfg["output_dir"] = os.path.expanduser(cfg["output_dir"])
+    files = model_files(model["dir"], needed=("config", "checkpoint", "image_stats"))
     index = tica_index(data["tica_dir"])
     incomplete = [f"{s} {f:08d}" for s, f in frames if any((s, f, c) not in index for c in range(1, 5))]
     if incomplete:
         raise FileNotFoundError(f"no complete set of CCD 1-4 TICA files under {data['tica_dir']} for: {incomplete}")
     device = torch.device("cuda")
     torch.backends.cudnn.benchmark = True # fixed input sizes
-    model_cfg = load_config(os.path.join(model["dir"], "config.yaml"))
-    net = load_model(os.path.join(model["dir"], model["checkpoint"]), flatten_config(model_cfg),
+    model_cfg = load_config(files["config"])
+    net = load_model(files["checkpoint"], flatten_config(model_cfg),
                      model["context_len"], device).nn_model
-                     
-    with open(os.path.join(model["dir"], "image_stats.pkl"), "rb") as f:
+
+    with open(files["image_stats"], "rb") as f:
         stats = pickle.load(f)
 
     sky_by_sector = model_cfg["data"]["sky_by_sector"]
