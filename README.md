@@ -124,7 +124,7 @@ Training needs an angle file and processed images, made with the scripts in `dat
    python data/process_angles.py --config data/config/preprocess_config.yaml
    ```
 
-2. **Images.** `data/preprocess_all.py` turns TICA FFIs (available from MAST as a High Level Science Product), stored in one subfolder per orbit, into the processed images the model trains on. Set `image_size` to the resolution you want to train at (the pretrained model uses 256).
+2. **Images.** `data/preprocess_all.py` turns TICA FFIs (available from MAST as a High Level Science Product), stored as `<fits_folder>/s0022/cam3-ccd1/*.fits` (one folder per sector, one per CCD), into the processed images the model trains on. Set `image_size` to the resolution you want to train at (the pretrained model uses 256).
 
    ```bash
    python data/preprocess_all.py --config data/config/preprocess_config.yaml

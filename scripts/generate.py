@@ -33,7 +33,6 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 # This script must mirror beam/training/trainer.py's model
-# construction exactly or the checkpoint will not load / the encoding drifts.
 from beam.models.unet import ContextUnet
 from beam.models.interpolant import ScoreMatch, EMA
 from beam.models.probabilitypath import GaussianProbabilityPath, OTAlpha, OTBeta, VPBeta
@@ -45,8 +44,7 @@ from beam.data.datasets import TESSDataset_angles_only
 # (1425.6 s effective), so this one factor converts them to e-/s for every cadence.
 E_PER_S_PER_UNIT = 633118 / 1425.6
 
-# The only keys read from the model config. All are required; none has a default,
-# so a missing key fails loudly instead of silently building the wrong model.
+
 REQUIRED_CONFIG_KEYS = [
     "model_architecture",
     "model_n_feat",
@@ -62,13 +60,12 @@ REQUIRED_CONFIG_KEYS = [
     "data_camera_number",
 ]
 
-# Optional architecture keys and their defaults. Cross-attention is off in this
-# version of the model, so a config may leave it out.
+#support for other config
 OPTIONAL_CONFIG_KEYS = {
     "model_use_cross_attn": False,
 }
 
-# Fixed file names inside every model folder. scripts/clean.py uses these too.
+# Fixed names in release
 MODEL_FILES = {
     "config": "config.yaml",
     "checkpoint": "checkpoint_epoch_final.pth",
@@ -98,8 +95,6 @@ def orbit_to_sector(orbit: int) -> int:
     return (int(orbit) - 7) // 2
 
 
-# Every key of the generation config. All are required and no others are allowed,
-# so a typo or a missing setting fails loudly instead of falling back to a default.
 GENERATION_KEYS = {
     "model_dir": "folder holding " + ", ".join(MODEL_FILES.values()),
     "angle_path": "Earth/Moon angle file (.pkl)",
@@ -236,7 +231,7 @@ def load_model(checkpoint_path, config, context_len, device, use_ema=True):
 
     if use_ema:
         if "ema_state_dict" not in checkpoint:
-            raise KeyError(f"No ema_state_dict in {checkpoint_path}; rerun with --no-ema")
+            raise KeyError(f"No ema_state_dict in {checkpoint_path}; can run without ema by changing config")
         ema = EMA(model=model)
         ema.load_state_dict(checkpoint["ema_state_dict"])
         ema.to(device)
