@@ -1,8 +1,8 @@
 # BEAM background cleaning (scripts/clean.py)
 
 model:
-  dir: /home/djtufto/models/model_outputs/cam3_tica_star_skynorm_256x256_uniform_sigma
-  checkpoint: checkpoint_epoch_final_20260804_155945.pth   # EMA weights
+  dir: /PATH/TO/STAR_PRIOR_MODEL/
+  checkpoint: /PATH/TO/CHECKPOINT/   # EMA weights
   context_len: 28        # conditioning vector length (12 null + 16 patch location)
   camera: 2              # camera index, 0-based (camera 3)
   bf16: true             # sample with mixed precision
@@ -14,7 +14,7 @@ data:
   file_unit: 633118      # e- per file unit
   exptime: 1425.6        # s; frames with a different EXPTIME are rejected
 
-output_dir: /PATH/TO/OUTPUT
+output_dir: /PATH/TO/OUTPUT/
 batch_size: 8            # frames per GPU batch
 seed: 0                  # tiling offsets
 
