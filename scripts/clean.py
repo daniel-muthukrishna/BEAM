@@ -53,6 +53,7 @@ def tica_index(root):
 
 def camera_image(ccd_paths, file_unit):
     """Stitch and trim CCD 1-4 into a 4096x4096 camera image """
+    c1, c2, c3, c4 = [fits.getdata(p).astype(np.float64) for p in ccd_paths]
     im = np.block([[c3, c4], [np.flip(c2), np.flip(c1)]])
     im = np.delete(np.delete(im, ROWS_TO_DELETE, axis=0), COLS_TO_DELETE, axis=1)
     return (im / file_unit).astype(np.float32)
@@ -108,7 +109,8 @@ def score(net, u, t, shift, model):
         ctx = torch.zeros(B, 1, model["context_len"], device=u.device)
         v = net(xb, ctx, torch.full((B, 1, 1, 1), t, device=u.device), torch.zeros_like(ctx),
                 torch.full((B,), model["camera"], device=u.device)).float()
-        s[i:i + B] = -(xb + t * v / sigma) 
+        s[i:i + B] = -(xb + t * v / sigma)
+    out = torch.empty_like(u)
     for j, ((a, b, r0), (c, d, c0)) in enumerate(grid):
         out[:, :, a:b, c:d] = s[j * R:(j + 1) * R, :, a - r0:b - r0, c - c0:d - c0]
     return out
@@ -119,7 +121,7 @@ def block_median(img, b):
     return np.median(img.reshape(n, b, n, b).swapaxes(1, 2).reshape(n, n, b * b), axis=-1)
 
 def star_mask(y):
-   """Masks pixels past 3 sigma"""
+    """Masks pixels past 3 sigma"""
     r = y - U(torch.from_numpy(block_median(y, BLOCK))[None, None])[0, 0].numpy()
     n = FINE // PATCH
     rp = r.reshape(n, PATCH, n, PATCH).swapaxes(1, 2).reshape(n, n, PATCH * PATCH)
