@@ -14,18 +14,14 @@ data:
   exptime: 1425.6        # s; frames with a different EXPTIME are rejected
 
 output_dir: /PATH/TO/OUTPUT/
-batch_size: 8            # frames per GPU batch
-seed: 0                  # tiling offsets
+batch_size: 4            # frames per GPU batch (two chains each)
+seed: 0                  # noise and tiling offsets
 
-ladder:
-  sigma_top: 0.8
-  sigma_bottom: 0.01
-  levels: 11             # log-spaced
-  steps_per_level: 20
-  step: 0.1              # relative step
+ladder:                 
+  t1: 0.7                # first level; sigma = sqrt(1 - t^2)
+  sigma_bottom: 0.01     # last level
+  levels: 500            # log-spaced in sigma
+  steps_per_level: 1
+  eta0: 1.0e-5           # eta = eta0*(sigma / sigma_1)^2
 
 clip: 2000               # residual clip, e-/s
-highpass: 33             # coarse cell filter with
-hold:
-  c: 2.0                 # tau = c*sigma/(t * K)
-  release: 10.0          # e-/s
