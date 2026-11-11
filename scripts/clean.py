@@ -82,12 +82,6 @@ def U_T(x):
         return torch.autograd.grad(U(w), w, grad_outputs=x)[0]
 
 
-def smooth(d, k):
-    for _ in range(2):
-        d = F.avg_pool2d(F.pad(d, (k // 2,) * 4, mode="reflect"), k, stride=1)
-    return d
-
-
 def shifted_tiles(d):
     cuts = sorted({0, FINE, *range(d, FINE, PATCH)})
     return [(a, b, min(a, FINE - PATCH)) for a, b in zip(cuts[:-1], cuts[1:])]
@@ -132,30 +126,31 @@ def star_mask(y):
     return 1 - star
 
 
-def clean(net, y, w, mask, lo, hi, sigmas, cfg, release):
-    """Main Cleaning algorithm. Hold keeps pixels near init as init is good there.
-    Release lets BEAM correct image where it needs correcting
+def clean(net, y, w, mask, lo, hi, sigmas, cfg, gen):
+    """ Annealed Langevin dynamics on the coarse background.
+    Two chains run together with opposite noise and their mean is returned.
     """
-    lad, hold_c = cfg["ladder"], cfg["hold"]["c"]
+    lad = cfg["ladder"]
     rng = np.random.default_rng(cfg["seed"]) # tiling offsets
-    w0 = w.clone()
+    B = len(w)
+    w = torch.cat([w, w])
+    y, mask, lo, hi = (torch.cat([x, x]) for x in (y, mask, lo, hi))
+    sign = torch.cat([torch.ones(B), -torch.ones(B)]).view(-1, 1, 1, 1).to(w.device)
     start = time.time()
-    for sigma in sigmas:
+    for l, sigma in enumerate(sigmas):
         t = math.sqrt(1 - sigma ** 2)
-        eta = lad["step"] * sigma ** 2 / (t ** 2 * K ** 2)
-        tau = hold_c * sigma / (t * K)
-        # MAP estimate as a efficient approx of averaging N chains
+        eta = lad["eta0"] * (sigma / sigmas[0]) ** 2
+        eps = torch.randn(B, 1, FINE, FINE, generator=gen, device=w.device).repeat(2, 1, 1, 1) # one draw per level
         for _ in range(lad["steps_per_level"]):
-            u = t * (y - U(w)).clamp(lo, hi) # clamp residual to remove preprocessing artifacts                      
+            u = t * (y - U(w)).clamp(lo, hi) + sigma * sign * eps # clipped residual, noised to level t
             shift = tuple(rng.integers(PATCH, size=2).tolist())
             s = score(net, u, t, shift, cfg["model"]) * mask # mask score at stars
             g = t * U_T(s)
-            g = g - smooth(g, cfg["highpass"]) # smooth part of init accurate
-            w = w - eta * g
-            d = w - w0 #hold                                              
-            w = w0 + d / (1 + (eta / tau ** 2) / (1 + (d / release) ** 2)) #release
-        print(f"  level sigma = {sigma:.4f} done ({time.time() - start:.0f} s)", flush=True)
-    return w
+            xi = torch.randn(B, 1, COARSE, COARSE, generator=gen, device=w.device).repeat(2, 1, 1, 1)
+            w = w - eta * g + math.sqrt(2 * eta) * sign * xi
+        if (l + 1) % 50 == 0:
+            print(f"  level {l + 1} of {len(sigmas)} done ({time.time() - start:.0f} s)", flush=True)
+    return 0.5 * (w[:B] + w[B:])
 
 
 def main():
@@ -173,7 +168,8 @@ def main():
                 frames.append((int(sector), int(ffi)))
 
     model, data = cfg["model"], cfg["data"]
-    # allow ~/ in every path setting
+
+
     model["dir"] = os.path.expanduser(model["dir"])
     data["tica_dir"] = os.path.expanduser(data["tica_dir"])
     data["start_dir"] = os.path.expanduser(data["start_dir"])
@@ -183,8 +179,11 @@ def main():
     incomplete = [f"{s} {f:08d}" for s, f in frames if any((s, f, c) not in index for c in range(1, 5))]
     if incomplete:
         raise FileNotFoundError(f"no complete set of CCD 1-4 TICA files under {data['tica_dir']} for: {incomplete}")
+    
+    
     device = torch.device("cuda")
     torch.backends.cudnn.benchmark = True # fixed input sizes
+    
     model_cfg = load_config(files["config"])
     net = load_model(files["checkpoint"], flatten_config(model_cfg),
                      model["context_len"], device).nn_model
@@ -197,9 +196,9 @@ def main():
     if missing:
         raise KeyError(f"sectors {missing} have no sky constant in the model's config.yaml")
     e_per_s = data["file_unit"] / data["exptime"] # e-/s per file unit
-    release = cfg["hold"]["release"] / (e_per_s * stats["std"])
     lad = cfg["ladder"]
-    sigmas = np.geomspace(lad["sigma_top"], lad["sigma_bottom"], lad["levels"])
+    sigmas = np.geomspace(math.sqrt(1 - lad["t1"] ** 2), lad["sigma_bottom"], lad["levels"])
+    gen = torch.Generator(device=device).manual_seed(cfg["seed"])
     os.makedirs(cfg["output_dir"], exist_ok=True)
 
     for i in range(0, len(frames), cfg["batch_size"]):
@@ -222,7 +221,7 @@ def main():
         lo, hi = (-c - sky - stats["mean"]) / stats["std"], (c - sky - stats["mean"]) / stats["std"]
 
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=model["bf16"]):
-            w = clean(net, y_model, w0, mask, lo, hi, sigmas, cfg, release)
+            w = clean(net, y_model, w0, mask, lo, hi, sigmas, cfg, gen)
 
         background = (U(w) * stats["std"]).cpu().numpy()[:, 0] * e_per_s
 
